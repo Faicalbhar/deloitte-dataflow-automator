@@ -1,4 +1,4 @@
-import type { Pipeline, PipelineRun, SchemaColumn, QualityRule, QuarantineRecord, DataCatalogTable, User } from '@/types';
+import type { Pipeline, PipelineRun, SchemaColumn, QualityRule, QuarantineRecord, DataCatalogTable, User, Transformation } from '@/types';
 
 export const currentUser: User = {
   id: '1',
@@ -15,40 +15,48 @@ const users: User[] = [
   { id: '4', name: 'Ahmed Khalil', email: 'ahmed.khalil@deloitte.com', role: 'Data Engineer' },
 ];
 
+export const mockTransformations: Transformation[] = [
+  { id: 't1', order: 1, type: 'filter', config: { condition: "status != 'cancelled'" }, sourceColumns: ['status'], description: "Filter out cancelled transactions" },
+  { id: 't2', order: 2, type: 'cast', config: { targetType: 'DECIMAL' }, sourceColumns: ['amount'], targetColumn: 'amount', description: "Cast amount to DECIMAL" },
+  { id: 't3', order: 3, type: 'rename', config: { newName: 'txn_date' }, sourceColumns: ['transaction_date'], targetColumn: 'txn_date', description: "Rename transaction_date to txn_date" },
+  { id: 't4', order: 4, type: 'add_column', config: { expression: "CONCAT(client_id, '-', transaction_id)" }, sourceColumns: ['client_id', 'transaction_id'], targetColumn: 'composite_key', description: "Create composite key" },
+  { id: 't5', order: 5, type: 'aggregate', config: { groupBy: ['client_id'], aggregations: [{ column: 'amount', func: 'SUM', alias: 'total_amount' }] }, sourceColumns: ['client_id', 'amount'], targetColumn: 'total_amount', description: "Aggregate total amount by client" },
+];
+
 export const mockPipelines: Pipeline[] = [
   {
     id: 'p1', name: 'Client Transactions ETL', description: 'Daily client transaction ingestion from SFTP', status: 'deployed',
     owner: users[0], createdAt: '2024-11-15T10:00:00Z', updatedAt: '2025-02-20T14:30:00Z', environment: 'production', notificationsEnabled: true,
-    schema: [], qualityRules: [], config: {},
+    schema: [], qualityRules: [], transformations: mockTransformations.slice(0, 3), config: {},
     lastExecution: { id: 'r1', pipelineId: 'p1', pipelineName: 'Client Transactions ETL', status: 'success', startedAt: '2025-02-26T06:00:00Z', completedAt: '2025-02-26T06:12:00Z', duration: '12m', rowsRead: 145200, rowsWritten: 143800, rowsQuarantined: 1400 },
   },
   {
     id: 'p2', name: 'Risk Assessment Feed', description: 'Hourly risk scoring data pipeline', status: 'running',
     owner: users[1], createdAt: '2024-12-01T09:00:00Z', updatedAt: '2025-02-26T08:00:00Z', environment: 'production', notificationsEnabled: true,
-    schema: [], qualityRules: [], config: {},
+    schema: [], qualityRules: [], transformations: mockTransformations.slice(0, 2), config: {},
     lastExecution: { id: 'r2', pipelineId: 'p2', pipelineName: 'Risk Assessment Feed', status: 'running', startedAt: '2025-02-26T08:00:00Z', duration: '—', rowsRead: 0, rowsWritten: 0, rowsQuarantined: 0 },
   },
   {
     id: 'p3', name: 'Regulatory Reporting', description: 'Monthly regulatory compliance data', status: 'failed',
     owner: users[2], createdAt: '2025-01-10T11:00:00Z', updatedAt: '2025-02-25T15:00:00Z', environment: 'production', notificationsEnabled: true,
-    schema: [], qualityRules: [], config: {},
+    schema: [], qualityRules: [], transformations: [mockTransformations[0]], config: {},
     lastExecution: { id: 'r3', pipelineId: 'p3', pipelineName: 'Regulatory Reporting', status: 'failed', startedAt: '2025-02-25T14:00:00Z', completedAt: '2025-02-25T14:05:00Z', duration: '5m', rowsRead: 50000, rowsWritten: 0, rowsQuarantined: 0 },
   },
   {
     id: 'p4', name: 'Customer Master Data', description: 'Customer reference data synchronization', status: 'deployed',
     owner: users[0], createdAt: '2025-01-20T08:00:00Z', updatedAt: '2025-02-24T10:00:00Z', environment: 'development', notificationsEnabled: false,
-    schema: [], qualityRules: [], config: {},
+    schema: [], qualityRules: [], transformations: mockTransformations, config: {},
     lastExecution: { id: 'r4', pipelineId: 'p4', pipelineName: 'Customer Master Data', status: 'success', startedAt: '2025-02-24T09:00:00Z', completedAt: '2025-02-24T09:08:00Z', duration: '8m', rowsRead: 89000, rowsWritten: 88500, rowsQuarantined: 500 },
   },
   {
     id: 'p5', name: 'Market Data Ingestion', description: 'Real-time market data feed processing', status: 'ready',
     owner: users[3], createdAt: '2025-02-10T14:00:00Z', updatedAt: '2025-02-22T16:00:00Z', environment: 'development', notificationsEnabled: false,
-    schema: [], qualityRules: [], config: {},
+    schema: [], qualityRules: [], transformations: [], config: {},
   },
   {
     id: 'p6', name: 'AML Screening Pipeline', description: 'Anti-money laundering screening data', status: 'draft',
     owner: users[1], createdAt: '2025-02-20T10:00:00Z', updatedAt: '2025-02-20T10:00:00Z', environment: 'development', notificationsEnabled: false,
-    schema: [], qualityRules: [], config: {},
+    schema: [], qualityRules: [], transformations: [], config: {},
   },
 ];
 
@@ -97,3 +105,29 @@ export const mockSchemaColumns: SchemaColumn[] = [
   { id: 'c7', name: 'status', type: 'STRING', nullable: false, unique: false, description: 'Transaction status', sensitive: false, sampleValues: ['completed', 'pending', 'cancelled'] },
   { id: 'c8', name: 'is_verified', type: 'BOOLEAN', nullable: false, unique: false, description: 'Verification flag', sensitive: false, sampleValues: ['true', 'false', 'true'] },
 ];
+
+export const availableTransformationTypes = [
+  { type: 'rename', label: 'Rename Column', description: 'Change column name' },
+  { type: 'cast', label: 'Cast Type', description: 'Change column data type' },
+  { type: 'filter', label: 'Filter Rows', description: 'Filter rows by condition' },
+  { type: 'aggregate', label: 'Aggregate', description: 'Group by and aggregate' },
+  { type: 'join', label: 'Join Tables', description: 'Join with another table' },
+  { type: 'drop_column', label: 'Drop Column', description: 'Remove a column' },
+  { type: 'add_column', label: 'Add Column', description: 'Create derived column' },
+  { type: 'split', label: 'Split Column', description: 'Split into multiple columns' },
+  { type: 'merge', label: 'Merge Columns', description: 'Concatenate columns' },
+  { type: 'deduplicate', label: 'Deduplicate', description: 'Remove duplicate rows' },
+  { type: 'sort', label: 'Sort', description: 'Order rows by column' },
+  { type: 'custom_sql', label: 'Custom SQL', description: 'Write custom SQL expression' },
+] as const;
+
+export const mockFirstRow: Record<string, string> = {
+  transaction_id: 'TXN-001',
+  client_id: 'CLT-100',
+  amount: '1500.00',
+  transaction_date: '2025-01-15',
+  client_name: 'Jean Dupont',
+  email: 'jean@example.com',
+  status: 'completed',
+  is_verified: 'true',
+};
