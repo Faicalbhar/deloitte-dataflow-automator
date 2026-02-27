@@ -10,6 +10,7 @@ import Dashboard from "@/pages/Dashboard";
 import Pipelines from "@/pages/Pipelines";
 import PipelineDetail from "@/pages/PipelineDetail";
 import CreatePipeline from "@/pages/CreatePipeline";
+import EditPipeline from "@/pages/EditPipeline";
 import DataCatalog from "@/pages/DataCatalog";
 import Quarantine from "@/pages/Quarantine";
 import SettingsPage from "@/pages/SettingsPage";
@@ -41,6 +42,7 @@ function AppRoutes() {
         <Route index element={<Dashboard />} />
         <Route path="pipelines" element={<Pipelines />} />
         <Route path="pipelines/:id" element={<PipelineDetail />} />
+        <Route path="pipelines/:id/edit" element={<EditPipeline />} />
         <Route path="create-pipeline" element={<CreatePipeline />} />
         <Route path="data-catalog" element={<DataCatalog />} />
         <Route path="quarantine" element={<Quarantine />} />

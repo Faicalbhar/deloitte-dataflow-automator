@@ -13,6 +13,7 @@ export interface Pipeline {
   notificationsEnabled: boolean;
   schema: SchemaColumn[];
   qualityRules: QualityRule[];
+  transformations: Transformation[];
   config: Record<string, unknown>;
 }
 
@@ -106,4 +107,28 @@ export interface MetricCard {
   change: number;
   changeLabel: string;
   icon: string;
+}
+
+export type TransformationType =
+  | 'rename'
+  | 'cast'
+  | 'filter'
+  | 'aggregate'
+  | 'join'
+  | 'drop_column'
+  | 'add_column'
+  | 'split'
+  | 'merge'
+  | 'deduplicate'
+  | 'sort'
+  | 'custom_sql';
+
+export interface Transformation {
+  id: string;
+  order: number;
+  type: TransformationType;
+  config: Record<string, unknown>;
+  sourceColumns: string[];
+  targetColumn?: string;
+  description: string;
 }

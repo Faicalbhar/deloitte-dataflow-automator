@@ -1,7 +1,10 @@
-import { useState } from 'react';
-import { Upload, FileSpreadsheet, Check, X, HelpCircle, ArrowLeft, ArrowRight, Save } from 'lucide-react';
+import { useState, useCallback } from 'react';
+import {
+  Upload, FileSpreadsheet, Check, X, HelpCircle, ArrowLeft, ArrowRight, Save,
+  Plus, Trash2, GripVertical, MessageSquare, Send, Bot, ChevronRight, Code
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -13,12 +16,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { useNavigate } from 'react-router-dom';
-import { mockSchemaColumns } from '@/data/mock-data';
-import type { SchemaColumn, ColumnType, QualityRule, QualityRuleType, OnFailureAction } from '@/types';
+import { mockSchemaColumns, mockFirstRow, availableTransformationTypes } from '@/data/mock-data';
+import type { SchemaColumn, ColumnType, Transformation, TransformationType } from '@/types';
 import { toast } from 'sonner';
 
-const STEPS = ['Contract Upload', 'Schema Validation', 'Quality Configuration', 'Review & Deploy'];
+const STEPS = ['Contract Upload', 'Schema & Transformations', 'Review & Deploy'];
 
 const typeColors: Record<ColumnType, string> = {
   STRING: 'bg-info text-info-foreground',
@@ -29,25 +34,31 @@ const typeColors: Record<ColumnType, string> = {
   TIMESTAMP: 'bg-accent text-accent-foreground',
 };
 
-const ruleCards: { type: QualityRuleType; label: string; icon: string; color: string }[] = [
-  { type: 'not_null', label: 'Expect Not Null', icon: '!', color: 'border-destructive/50 bg-destructive/5' },
-  { type: 'unique', label: 'Expect Unique', icon: '⊕', color: 'border-info/50 bg-info/5' },
-  { type: 'range', label: 'Expect Range', icon: '↔', color: 'border-success/50 bg-success/5' },
-  { type: 'regex', label: 'Expect Regex', icon: '.*', color: 'border-warning/50 bg-warning/5' },
-  { type: 'values_in_set', label: 'Values In Set', icon: '≡', color: 'border-accent/50 bg-accent/5' },
-  { type: 'referential_integrity', label: 'Ref. Integrity', icon: '⇔', color: 'border-primary/50 bg-primary/5' },
-];
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 const CreatePipeline = () => {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
+
+  // Step 1
   const [file, setFile] = useState<File | null>(null);
   const [fileValid, setFileValid] = useState(false);
   const [fileMask, setFileMask] = useState('');
   const [columns, setColumns] = useState<SchemaColumn[]>([]);
-  const [rules, setRules] = useState<QualityRule[]>([]);
-  const [selectedRule, setSelectedRule] = useState<QualityRule | null>(null);
-  const [dragType, setDragType] = useState<QualityRuleType | null>(null);
+  const [matchInfo, setMatchInfo] = useState<string | null>(null);
+
+  // Step 2 — Transformations
+  const [transformations, setTransformations] = useState<Transformation[]>([]);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    { role: 'assistant', content: "Hi! I'm your AI assistant. I can help you create transformations. Try asking:\n- \"Filter out rows where status is cancelled\"\n- \"Rename column transaction_date to txn_date\"\n- \"Create a composite key from client_id and transaction_id\"" }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+
+  // Step 3 — Deploy
   const [pipelineName, setPipelineName] = useState('');
   const [pipelineDesc, setPipelineDesc] = useState('');
   const [env, setEnv] = useState<'development' | 'production'>('development');
@@ -57,7 +68,7 @@ const CreatePipeline = () => {
   const [deployStep, setDeployStep] = useState(0);
   const [confirmName, setConfirmName] = useState('');
 
-  // Step 1 - File Upload simulation
+  // Step 1 handlers
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (f) {
@@ -65,8 +76,9 @@ const CreatePipeline = () => {
       setTimeout(() => {
         setFileValid(true);
         setColumns(mockSchemaColumns);
-        toast.success('Contract parsed successfully');
-      }, 1000);
+        setMatchInfo('Backend matched file "transactions_2025_01.csv" (92% match with data contract). All required columns present. Missing optional column: "currency" (will default to EUR).');
+        toast.success('Contract parsed — file matched to data contract');
+      }, 1200);
     }
   };
 
@@ -78,29 +90,102 @@ const CreatePipeline = () => {
       setTimeout(() => {
         setFileValid(true);
         setColumns(mockSchemaColumns);
+        setMatchInfo('Backend matched file "transactions_2025_01.csv" (92% match). Missing optional: "currency".');
         toast.success('Contract parsed successfully');
-      }, 1000);
+      }, 1200);
     }
   };
 
-  // Step 3 - Drop rule on column
-  const handleDropRule = (columnId: string, columnName: string) => {
-    if (!dragType) return;
-    const newRule: QualityRule = {
-      id: `rule-${Date.now()}`,
-      type: dragType,
-      columnId,
-      columnName,
+  // Transformation handlers
+  const addTransformation = (type: TransformationType) => {
+    const newT: Transformation = {
+      id: `t-${Date.now()}`,
+      order: transformations.length + 1,
+      type,
       config: {},
-      onFailure: 'quarantine',
+      sourceColumns: [],
+      description: availableTransformationTypes.find(t => t.type === type)?.label || type,
     };
-    setRules([...rules, newRule]);
-    setSelectedRule(newRule);
-    setDragType(null);
+    setTransformations([...transformations, newT]);
   };
 
-  // Step 4 - Deploy
-  const deploySteps = ['Validating configuration', 'Generating code', 'Creating bundle', 'Deploying to Databricks', 'Running smoke tests', 'Completed'];
+  const removeTransformation = (id: string) => {
+    setTransformations(transformations.filter(t => t.id !== id).map((t, i) => ({ ...t, order: i + 1 })));
+  };
+
+  const updateTransformation = (id: string, updates: Partial<Transformation>) => {
+    setTransformations(transformations.map(t => t.id === id ? { ...t, ...updates } : t));
+  };
+
+  // AI Chat
+  const handleSendChat = () => {
+    if (!chatInput.trim()) return;
+    const userMsg = chatInput.trim();
+    setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    setChatInput('');
+
+    // Simulate AI response
+    setTimeout(() => {
+      let response = '';
+      let newTransformation: Transformation | null = null;
+
+      if (userMsg.toLowerCase().includes('filter')) {
+        newTransformation = {
+          id: `t-${Date.now()}`,
+          order: transformations.length + 1,
+          type: 'filter',
+          config: { condition: "status != 'cancelled'" },
+          sourceColumns: ['status'],
+          description: "Filter out cancelled rows",
+        };
+        response = "✅ I've added a **Filter** transformation to remove rows where status is 'cancelled'. You can see it in your transformation list (#" + (transformations.length + 1) + ").";
+      } else if (userMsg.toLowerCase().includes('rename')) {
+        newTransformation = {
+          id: `t-${Date.now()}`,
+          order: transformations.length + 1,
+          type: 'rename',
+          config: { newName: 'txn_date' },
+          sourceColumns: ['transaction_date'],
+          targetColumn: 'txn_date',
+          description: "Rename transaction_date → txn_date",
+        };
+        response = "✅ I've added a **Rename** transformation: `transaction_date` → `txn_date`. Check transformation #" + (transformations.length + 1) + ".";
+      } else if (userMsg.toLowerCase().includes('aggregate') || userMsg.toLowerCase().includes('group')) {
+        newTransformation = {
+          id: `t-${Date.now()}`,
+          order: transformations.length + 1,
+          type: 'aggregate',
+          config: { groupBy: ['client_id'], aggregations: [{ column: 'amount', func: 'SUM', alias: 'total_amount' }] },
+          sourceColumns: ['client_id', 'amount'],
+          targetColumn: 'total_amount',
+          description: "Aggregate total amount by client",
+        };
+        response = "✅ I've added an **Aggregate** transformation: SUM(amount) grouped by client_id. This will create a new output table with aggregated results.";
+      } else if (userMsg.toLowerCase().includes('composite') || userMsg.toLowerCase().includes('concat') || userMsg.toLowerCase().includes('merge')) {
+        newTransformation = {
+          id: `t-${Date.now()}`,
+          order: transformations.length + 1,
+          type: 'add_column',
+          config: { expression: "CONCAT(client_id, '-', transaction_id)" },
+          sourceColumns: ['client_id', 'transaction_id'],
+          targetColumn: 'composite_key',
+          description: "Create composite key from client_id + transaction_id",
+        };
+        response = "✅ I've added an **Add Column** transformation to create `composite_key` = `CONCAT(client_id, '-', transaction_id)`.";
+      } else {
+        response = "I understand you want to create a transformation. Could you be more specific? For example:\n- \"Filter rows where amount > 1000\"\n- \"Rename column X to Y\"\n- \"Aggregate amount by client_id\"\n- \"Add a composite key column\"";
+      }
+
+      if (newTransformation) {
+        setTransformations(prev => [...prev, newTransformation!]);
+      }
+
+      setChatMessages(prev => [...prev, { role: 'assistant', content: response }]);
+    }, 800);
+  };
+
+  // Deploy
+  const deploySteps = ['Validating configuration', 'Generating DLT code', 'Creating bundle', 'Deploying to Databricks', 'Running smoke tests', 'Completed'];
   const handleDeploy = async () => {
     setDeploying(true);
     for (let i = 0; i < deploySteps.length; i++) {
@@ -113,10 +198,32 @@ const CreatePipeline = () => {
     navigate('/pipelines');
   };
 
-  const canNext = step === 0 ? fileValid : step === 1 ? columns.length > 0 : step === 2 ? true : !!pipelineName;
+  const canNext = step === 0 ? fileValid : step === 1 ? columns.length > 0 : !!pipelineName;
+
+  // Generate JSON for backend
+  const generatePipelineJson = () => ({
+    name: pipelineName || 'unnamed',
+    description: pipelineDesc,
+    environment: env,
+    notifications: notifications,
+    source: {
+      fileMask: fileMask,
+      path: '/mnt/data/transactions/',
+      format: 'csv',
+    },
+    schema: columns.map(c => ({ name: c.name, type: c.type, nullable: c.nullable, sensitive: c.sensitive })),
+    transformations: transformations.map(t => ({
+      order: t.order,
+      type: t.type,
+      config: t.config,
+      sourceColumns: t.sourceColumns,
+      targetColumn: t.targetColumn,
+      description: t.description,
+    })),
+  });
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-7xl mx-auto space-y-6">
       {/* Progress */}
       <div className="space-y-2">
         <div className="flex justify-between text-sm">
@@ -152,12 +259,22 @@ const CreatePipeline = () => {
                   <p className="text-sm text-muted-foreground">{columns.length} columns detected · {fileValid ? 'Valid' : 'Validating...'}</p>
                 </div>
                 {fileValid ? <Check className="h-5 w-5 text-success" /> : <div className="h-5 w-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />}
-                <Button variant="ghost" size="icon" onClick={() => { setFile(null); setFileValid(false); setColumns([]); }}>
+                <Button variant="ghost" size="icon" onClick={() => { setFile(null); setFileValid(false); setColumns([]); setMatchInfo(null); }}>
                   <X className="h-4 w-4" />
                 </Button>
               </div>
             )}
           </div>
+
+          {/* Match info from backend */}
+          {matchInfo && (
+            <Card className="border-primary/30 bg-primary/5">
+              <CardContent className="p-4 text-sm">
+                <p className="font-medium text-primary mb-1">📋 File Match Result</p>
+                <p className="text-muted-foreground">{matchInfo}</p>
+              </CardContent>
+            </Card>
+          )}
 
           <Button variant="outline" size="sm" className="gap-2">
             <FileSpreadsheet className="h-4 w-4" /> Download Contract Template
@@ -168,7 +285,7 @@ const CreatePipeline = () => {
               <Label>File Mask</Label>
               <Tooltip>
                 <TooltipTrigger><HelpCircle className="h-3.5 w-3.5 text-muted-foreground" /></TooltipTrigger>
-                <TooltipContent>Pattern to match source files, e.g. client_*.csv</TooltipContent>
+                <TooltipContent>Pattern used by backend to find matching files, e.g. client_*.csv</TooltipContent>
               </Tooltip>
             </div>
             <Input placeholder="e.g. client_2024_*.csv" value={fileMask} onChange={(e) => setFileMask(e.target.value)} />
@@ -176,247 +293,284 @@ const CreatePipeline = () => {
         </div>
       )}
 
-      {/* Step 2: Schema Validation */}
+      {/* Step 2: Schema + Transformations */}
       {step === 1 && (
-        <div className="space-y-4">
-          <Card>
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div className="text-sm">
-                  <span className="text-muted-foreground">Source: </span>
-                  <span className="font-mono text-xs">/mnt/data/transactions/</span>
-                </div>
-                <Button variant="outline" size="sm" onClick={() => toast.success('Connection successful')}>
-                  Test Connection
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/50">
-                    <TableHead>Column</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Constraints</TableHead>
-                    <TableHead>Sample Values</TableHead>
-                    <TableHead>Description</TableHead>
-                    <TableHead>PII</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {columns.map((col, i) => (
-                    <TableRow key={col.id}>
-                      <TableCell className="font-mono text-xs">{col.name}</TableCell>
-                      <TableCell>
-                        <Select
-                          value={col.type}
-                          onValueChange={(v) => {
-                            const updated = [...columns];
-                            updated[i] = { ...col, type: v as ColumnType };
-                            setColumns(updated);
-                          }}
-                        >
-                          <SelectTrigger className="w-28 h-7">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {(['STRING', 'INTEGER', 'DECIMAL', 'DATE', 'BOOLEAN', 'TIMESTAMP'] as ColumnType[]).map((t) => (
-                              <SelectItem key={t} value={t}>
-                                <Badge className={`${typeColors[t]} text-xs`}>{t}</Badge>
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex gap-1">
-                          {!col.nullable && <Badge variant="outline" className="text-[10px]">NOT NULL</Badge>}
-                          {col.unique && <Badge variant="outline" className="text-[10px]">UNIQUE</Badge>}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{col.sampleValues.join(', ')}</TableCell>
-                      <TableCell>
-                        <Input
-                          className="h-7 text-xs"
-                          placeholder="Description"
-                          value={col.description}
-                          onChange={(e) => {
-                            const updated = [...columns];
-                            updated[i] = { ...col, description: e.target.value };
-                            setColumns(updated);
-                          }}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <Switch
-                          checked={col.sensitive}
-                          onCheckedChange={(v) => {
-                            const updated = [...columns];
-                            updated[i] = { ...col, sensitive: v };
-                            setColumns(updated);
-                          }}
-                        />
-                      </TableCell>
+        <div className="flex gap-4 relative">
+          {/* Left: Columns with types + first row preview */}
+          <div className="w-1/3 space-y-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm">Source Columns</CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/50">
+                      <TableHead className="text-xs">Column</TableHead>
+                      <TableHead className="text-xs">Type</TableHead>
+                      <TableHead className="text-xs">Sample</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+                  </TableHeader>
+                  <TableBody>
+                    {columns.map((col) => (
+                      <TableRow key={col.id} className="text-xs">
+                        <TableCell className="font-mono py-2">{col.name}</TableCell>
+                        <TableCell className="py-2">
+                          <Badge className={`${typeColors[col.type]} text-[10px]`}>{col.type}</Badge>
+                        </TableCell>
+                        <TableCell className="py-2 text-muted-foreground truncate max-w-[100px]">
+                          {mockFirstRow[col.name] || '—'}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
 
-      {/* Step 3: Quality Checks */}
-      {step === 2 && (
-        <div className="grid grid-cols-4 gap-4" style={{ minHeight: 400 }}>
-          {/* Rule palette */}
-          <div className="space-y-2">
-            <p className="text-sm font-semibold mb-2">Quality Checks</p>
-            {ruleCards.map((rc) => (
-              <div
-                key={rc.type}
-                draggable
-                onDragStart={() => setDragType(rc.type)}
-                className={`border rounded-md p-3 cursor-grab active:cursor-grabbing transition-all hover:shadow-sm ${rc.color}`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-lg font-bold">{rc.icon}</span>
-                  <span className="text-xs font-medium">{rc.label}</span>
-                </div>
-              </div>
-            ))}
+            {/* First row preview */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm">Data Preview (1st row)</CardTitle>
+              </CardHeader>
+              <CardContent className="p-3">
+                <pre className="bg-muted rounded p-2 text-[10px] overflow-auto max-h-40">
+                  {JSON.stringify(mockFirstRow, null, 2)}
+                </pre>
+              </CardContent>
+            </Card>
           </div>
 
-          {/* Column canvas */}
-          <div className="col-span-2 space-y-2 overflow-auto">
-            <p className="text-sm font-semibold mb-2">Columns</p>
-            {columns.map((col) => {
-              const colRules = rules.filter((r) => r.columnId === col.id);
-              return (
-                <div
-                  key={col.id}
-                  className="border rounded-md p-3 bg-card"
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => handleDropRule(col.id, col.name)}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="font-mono text-xs font-medium">{col.name}</span>
-                    <Badge className={`${typeColors[col.type]} text-[10px]`}>{col.type}</Badge>
-                  </div>
-                  {colRules.length === 0 ? (
-                    <div className="border border-dashed rounded p-2 text-center text-xs text-muted-foreground">
-                      Drop quality check here
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap gap-1">
-                      {colRules.map((r) => (
-                        <Badge
-                          key={r.id}
-                          variant="outline"
-                          className="cursor-pointer text-[10px] hover:bg-accent"
-                          onClick={() => setSelectedRule(r)}
-                        >
-                          {ruleCards.find((rc) => rc.type === r.type)?.label}
-                        </Badge>
+          {/* Right: Transformation Builder */}
+          <div className="flex-1 space-y-4">
+            <Card>
+              <CardHeader className="pb-2 flex flex-row items-center justify-between">
+                <CardTitle className="text-sm">Transformations</CardTitle>
+                <div className="flex gap-2">
+                  <Select onValueChange={(v) => addTransformation(v as TransformationType)}>
+                    <SelectTrigger className="h-8 w-48 text-xs">
+                      <SelectValue placeholder="+ Add transformation" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableTransformationTypes.map((t) => (
+                        <SelectItem key={t.type} value={t.type}>
+                          <div>
+                            <span className="font-medium">{t.label}</span>
+                            <span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span>
+                          </div>
+                        </SelectItem>
                       ))}
-                    </div>
-                  )}
+                    </SelectContent>
+                  </Select>
+                  <Button variant="outline" size="sm" className="gap-1 text-xs" onClick={() => setAiOpen(true)}>
+                    <Bot className="h-3.5 w-3.5" /> AI Assistant
+                  </Button>
                 </div>
-              );
-            })}
-          </div>
-
-          {/* Configurator */}
-          <div className="space-y-3">
-            <p className="text-sm font-semibold mb-2">Configuration</p>
-            {selectedRule ? (
-              <Card>
-                <CardContent className="p-3 space-y-3">
-                  <p className="text-xs font-semibold">{ruleCards.find((rc) => rc.type === selectedRule.type)?.label}</p>
-                  <p className="text-xs text-muted-foreground">Column: {selectedRule.columnName}</p>
-
-                  {selectedRule.type === 'range' && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <Label className="text-xs">Min</Label>
-                        <Input type="number" className="h-7 text-xs" placeholder="0" />
-                      </div>
-                      <div>
-                        <Label className="text-xs">Max</Label>
-                        <Input type="number" className="h-7 text-xs" placeholder="1000000" />
-                      </div>
-                    </div>
-                  )}
-                  {selectedRule.type === 'regex' && (
-                    <div>
-                      <Label className="text-xs">Pattern</Label>
-                      <Input className="h-7 text-xs font-mono" placeholder="^[A-Z]{3}-\d+" />
-                    </div>
-                  )}
-                  {selectedRule.type === 'values_in_set' && (
-                    <div>
-                      <Label className="text-xs">Accepted Values</Label>
-                      <Textarea className="text-xs" placeholder="value1, value2, value3" rows={3} />
-                    </div>
-                  )}
-
-                  <div>
-                    <Label className="text-xs">On Failure</Label>
-                    <Select
-                      value={selectedRule.onFailure}
-                      onValueChange={(v) =>
-                        setSelectedRule({ ...selectedRule, onFailure: v as OnFailureAction })
-                      }
-                    >
-                      <SelectTrigger className="h-7 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="fail">Fail Pipeline</SelectItem>
-                        <SelectItem value="drop">Drop Row</SelectItem>
-                        <SelectItem value="quarantine">Quarantine</SelectItem>
-                        <SelectItem value="warn">Warn Only</SelectItem>
-                      </SelectContent>
-                    </Select>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {transformations.length === 0 ? (
+                  <div className="border border-dashed rounded-lg p-8 text-center text-muted-foreground">
+                    <p className="text-sm font-medium mb-1">No transformations yet</p>
+                    <p className="text-xs">Add transformations using the dropdown above, drag & drop, or ask the AI assistant.</p>
                   </div>
+                ) : (
+                  transformations.map((t, i) => (
+                    <Card key={t.id} className="border bg-muted/30">
+                      <CardContent className="p-3 flex items-start gap-3">
+                        <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                          <GripVertical className="h-4 w-4 text-muted-foreground cursor-grab" />
+                          <Badge variant="outline" className="text-xs font-mono w-7 justify-center">{t.order}</Badge>
+                        </div>
+                        <div className="flex-1 min-w-0 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <Badge className="bg-primary/10 text-primary text-[10px]">{t.type.replace('_', ' ').toUpperCase()}</Badge>
+                            <span className="text-xs font-medium">{t.description}</span>
+                          </div>
 
-                  <p className="text-[10px] text-muted-foreground italic">
-                    ~15% of rows may be affected based on sample
+                          {/* Transformation-specific config */}
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <Label className="text-[10px]">Source Column(s)</Label>
+                              <Select
+                                value={t.sourceColumns[0] || ''}
+                                onValueChange={(v) => updateTransformation(t.id, { sourceColumns: [v] })}
+                              >
+                                <SelectTrigger className="h-7 text-xs">
+                                  <SelectValue placeholder="Select column" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {columns.map(c => (
+                                    <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            {t.type === 'rename' && (
+                              <div>
+                                <Label className="text-[10px]">New Name</Label>
+                                <Input
+                                  className="h-7 text-xs"
+                                  placeholder="new_column_name"
+                                  value={(t.config.newName as string) || ''}
+                                  onChange={(e) => updateTransformation(t.id, { config: { ...t.config, newName: e.target.value } })}
+                                />
+                              </div>
+                            )}
+
+                            {t.type === 'cast' && (
+                              <div>
+                                <Label className="text-[10px]">Target Type</Label>
+                                <Select
+                                  value={(t.config.targetType as string) || ''}
+                                  onValueChange={(v) => updateTransformation(t.id, { config: { ...t.config, targetType: v } })}
+                                >
+                                  <SelectTrigger className="h-7 text-xs"><SelectValue placeholder="Type" /></SelectTrigger>
+                                  <SelectContent>
+                                    {['STRING', 'INTEGER', 'DECIMAL', 'DATE', 'BOOLEAN', 'TIMESTAMP'].map(t => (
+                                      <SelectItem key={t} value={t}>{t}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            )}
+
+                            {t.type === 'filter' && (
+                              <div>
+                                <Label className="text-[10px]">Condition</Label>
+                                <Input
+                                  className="h-7 text-xs font-mono"
+                                  placeholder="column != 'value'"
+                                  value={(t.config.condition as string) || ''}
+                                  onChange={(e) => updateTransformation(t.id, { config: { ...t.config, condition: e.target.value } })}
+                                />
+                              </div>
+                            )}
+
+                            {t.type === 'add_column' && (
+                              <div>
+                                <Label className="text-[10px]">Expression</Label>
+                                <Input
+                                  className="h-7 text-xs font-mono"
+                                  placeholder="CONCAT(a, b)"
+                                  value={(t.config.expression as string) || ''}
+                                  onChange={(e) => updateTransformation(t.id, { config: { ...t.config, expression: e.target.value } })}
+                                />
+                              </div>
+                            )}
+
+                            {t.type === 'aggregate' && (
+                              <div>
+                                <Label className="text-[10px]">Group By</Label>
+                                <Input
+                                  className="h-7 text-xs font-mono"
+                                  placeholder="column1, column2"
+                                  value={(t.config.groupBy as string[])?.join(', ') || ''}
+                                  onChange={(e) => updateTransformation(t.id, { config: { ...t.config, groupBy: e.target.value.split(',').map(s => s.trim()) } })}
+                                />
+                              </div>
+                            )}
+
+                            {t.type === 'custom_sql' && (
+                              <div className="col-span-2">
+                                <Label className="text-[10px]">SQL Expression</Label>
+                                <Textarea
+                                  className="text-xs font-mono"
+                                  rows={2}
+                                  placeholder="SELECT * FROM ..."
+                                  value={(t.config.sql as string) || ''}
+                                  onChange={(e) => updateTransformation(t.id, { config: { ...t.config, sql: e.target.value } })}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 shrink-0 text-destructive hover:text-destructive"
+                          onClick={() => removeTransformation(t.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  ))
+                )}
+
+                {/* Quick add button */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full gap-2 border-dashed text-xs"
+                  onClick={() => addTransformation('filter')}
+                >
+                  <Plus className="h-3.5 w-3.5" /> Add Transformation
+                </Button>
+              </CardContent>
+            </Card>
+
+            {/* JSON Preview */}
+            {transformations.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2 flex flex-row items-center gap-2">
+                  <Code className="h-4 w-4 text-muted-foreground" />
+                  <CardTitle className="text-sm">Pipeline JSON (sent to backend)</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <pre className="bg-muted rounded-md p-3 text-[10px] font-mono overflow-auto max-h-48">
+                    {JSON.stringify(generatePipelineJson(), null, 2)}
+                  </pre>
+                  <p className="text-[10px] text-muted-foreground mt-2">
+                    This JSON will be parsed by the Python backend to generate a Databricks DLT declarative pipeline.
                   </p>
                 </CardContent>
               </Card>
-            ) : (
-              <p className="text-xs text-muted-foreground">Select a rule to configure it.</p>
             )}
           </div>
 
-          {/* Bottom summary */}
-          <div className="col-span-4 border-t pt-4 mt-2">
-            <div className="flex items-center justify-center gap-4 text-sm">
-              <div className="px-4 py-2 rounded bg-warning/10 border border-warning/30 text-center">
-                <p className="font-bold">Bronze</p>
-                <p className="text-xs text-muted-foreground">Raw Data</p>
+          {/* AI Assistant Drawer */}
+          <Sheet open={aiOpen} onOpenChange={setAiOpen}>
+            <SheetContent className="sm:max-w-md flex flex-col">
+              <SheetHeader>
+                <SheetTitle className="flex items-center gap-2">
+                  <Bot className="h-5 w-5 text-primary" /> AI Transformation Assistant
+                </SheetTitle>
+              </SheetHeader>
+              <ScrollArea className="flex-1 mt-4 pr-4">
+                <div className="space-y-4">
+                  {chatMessages.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+                        msg.role === 'user'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-muted'
+                      }`}>
+                        <p className="whitespace-pre-wrap">{msg.content}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </ScrollArea>
+              <div className="flex gap-2 mt-4 pt-4 border-t">
+                <Input
+                  placeholder="Describe a transformation..."
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSendChat()}
+                  className="text-sm"
+                />
+                <Button size="icon" onClick={handleSendChat}>
+                  <Send className="h-4 w-4" />
+                </Button>
               </div>
-              <ArrowRight className="h-4 w-4 text-muted-foreground" />
-              <div className="px-4 py-2 rounded bg-primary/10 border border-primary/30 text-center">
-                <p className="font-bold">Silver</p>
-                <p className="text-xs text-muted-foreground">{rules.length} rules</p>
-              </div>
-              <ArrowRight className="h-4 w-4 text-muted-foreground" />
-              <div className="px-4 py-2 rounded bg-success/10 border border-success/30 text-center">
-                <p className="font-bold">Gold</p>
-                <p className="text-xs text-muted-foreground">Aggregated</p>
-              </div>
-            </div>
-          </div>
+            </SheetContent>
+          </Sheet>
         </div>
       )}
 
-      {/* Step 4: Review & Deploy */}
-      {step === 3 && (
+      {/* Step 3: Review & Deploy */}
+      {step === 2 && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -445,57 +599,64 @@ const CreatePipeline = () => {
 
           <Tabs defaultValue="config">
             <TabsList>
-              <TabsTrigger value="config">Configuration</TabsTrigger>
-              <TabsTrigger value="code">Preview Code</TabsTrigger>
-              <TabsTrigger value="plan">Execution Plan</TabsTrigger>
+              <TabsTrigger value="config">Configuration JSON</TabsTrigger>
+              <TabsTrigger value="code">DLT Code Preview</TabsTrigger>
+              <TabsTrigger value="transforms">Transformations ({transformations.length})</TabsTrigger>
             </TabsList>
             <TabsContent value="config" className="mt-4">
-              <pre className="bg-muted p-4 rounded-md text-xs overflow-auto max-h-64">
-{JSON.stringify({
-  name: pipelineName || 'unnamed',
-  environment: env,
-  columns: columns.map(c => ({ name: c.name, type: c.type })),
-  rules: rules.map(r => ({ type: r.type, column: r.columnName, onFailure: r.onFailure })),
-}, null, 2)}
+              <pre className="bg-muted p-4 rounded-md text-xs overflow-auto max-h-80 font-mono">
+                {JSON.stringify(generatePipelineJson(), null, 2)}
               </pre>
             </TabsContent>
             <TabsContent value="code" className="mt-4">
-              <pre className="bg-muted p-4 rounded-md text-xs overflow-auto max-h-64 font-mono">
+              <pre className="bg-muted p-4 rounded-md text-xs overflow-auto max-h-80 font-mono">
 {`import dlt
 from pyspark.sql.functions import *
 
+# Auto-generated by Data Pipeline Automation Platform
+# Pipeline: ${pipelineName || 'unnamed'}
+
 @dlt.table(name="bronze_${pipelineName || 'data'}")
 def bronze():
-    return spark.read.format("csv").load("/mnt/data/")
+    return spark.read.format("csv")\\
+        .option("header", "true")\\
+        .load("/mnt/data/${fileMask || '*.csv'}")
 
 @dlt.table(name="silver_${pipelineName || 'data'}")
-@dlt.expect_all_or_drop({
-${rules.map(r => `    "${r.type}_${r.columnName}": "${r.columnName} IS NOT NULL"`).join(',\n')}
-})
 def silver():
-    return dlt.read("bronze_${pipelineName || 'data'}")
+    df = dlt.read("bronze_${pipelineName || 'data'}")
+${transformations.map(t => {
+  if (t.type === 'filter') return `    df = df.filter("${t.config.condition || ''}")  # ${t.description}`;
+  if (t.type === 'rename') return `    df = df.withColumnRenamed("${t.sourceColumns[0] || ''}", "${t.config.newName || ''}")  # ${t.description}`;
+  if (t.type === 'cast') return `    df = df.withColumn("${t.sourceColumns[0] || ''}", col("${t.sourceColumns[0] || ''}").cast("${t.config.targetType || ''}"))  # ${t.description}`;
+  if (t.type === 'add_column') return `    df = df.withColumn("${t.targetColumn || 'new_col'}", expr("${t.config.expression || ''}"))  # ${t.description}`;
+  if (t.type === 'drop_column') return `    df = df.drop("${t.sourceColumns[0] || ''}")  # ${t.description}`;
+  return `    # ${t.type}: ${t.description}`;
+}).join('\n')}
+    return df
 
-@dlt.table(name="gold_${pipelineName || 'data'}")
+${transformations.some(t => t.type === 'aggregate') ? `@dlt.table(name="gold_${pipelineName || 'data'}")
 def gold():
-    return dlt.read("silver_${pipelineName || 'data'}").groupBy("status").count()`}
+    df = dlt.read("silver_${pipelineName || 'data'}")
+${transformations.filter(t => t.type === 'aggregate').map(t => 
+  `    df = df.groupBy(${(t.config.groupBy as string[])?.map(c => `"${c}"`).join(', ') || ''}).agg(sum("amount").alias("total_amount"))`
+).join('\n')}
+    return df` : `# No aggregation transformations — Gold layer not generated`}`}
               </pre>
             </TabsContent>
-            <TabsContent value="plan" className="mt-4">
-              <div className="flex items-center justify-center gap-6 py-8">
-                <div className="text-center p-4 rounded-lg bg-warning/10 border border-warning/30 w-32">
-                  <p className="font-bold">Bronze</p>
-                  <p className="text-xs text-muted-foreground mt-1">{columns.length} columns</p>
-                </div>
-                <ArrowRight className="h-5 w-5 text-muted-foreground" />
-                <div className="text-center p-4 rounded-lg bg-primary/10 border border-primary/30 w-32">
-                  <p className="font-bold">Silver</p>
-                  <p className="text-xs text-muted-foreground mt-1">{rules.length} quality rules</p>
-                </div>
-                <ArrowRight className="h-5 w-5 text-muted-foreground" />
-                <div className="text-center p-4 rounded-lg bg-success/10 border border-success/30 w-32">
-                  <p className="font-bold">Gold</p>
-                  <p className="text-xs text-muted-foreground mt-1">Aggregated</p>
-                </div>
+            <TabsContent value="transforms" className="mt-4">
+              <div className="space-y-2">
+                {transformations.map(t => (
+                  <div key={t.id} className="flex items-center gap-3 p-3 rounded-md bg-muted/50 border text-sm">
+                    <Badge variant="outline" className="font-mono text-xs">{t.order}</Badge>
+                    <Badge className="bg-primary/10 text-primary text-[10px]">{t.type.replace('_', ' ')}</Badge>
+                    <span className="flex-1">{t.description}</span>
+                    <span className="text-xs text-muted-foreground">{t.sourceColumns.join(', ')}</span>
+                  </div>
+                ))}
+                {transformations.length === 0 && (
+                  <p className="text-sm text-muted-foreground text-center py-4">No transformations configured</p>
+                )}
               </div>
             </TabsContent>
           </Tabs>
@@ -519,7 +680,7 @@ def gold():
               <Save className="h-4 w-4" /> Save as Draft
             </Button>
           )}
-          {step < 3 ? (
+          {step < 2 ? (
             <Button className="gap-2" disabled={!canNext} onClick={() => setStep(step + 1)}>
               Next Step <ArrowRight className="h-4 w-4" />
             </Button>
@@ -531,7 +692,7 @@ def gold():
         </div>
       </div>
 
-      {/* Deploy Confirmation Modal */}
+      {/* Deploy Modal */}
       <Dialog open={deployModal} onOpenChange={setDeployModal}>
         <DialogContent>
           {!deploying ? (
@@ -541,7 +702,7 @@ def gold():
               </DialogHeader>
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  You are about to deploy <strong>{pipelineName}</strong> to <strong>{env}</strong>.
+                  Deploy <strong>{pipelineName}</strong> to <strong>{env}</strong> with {transformations.length} transformation(s).
                 </p>
                 <div className="space-y-2">
                   <Label className="text-sm">Type the pipeline name to confirm:</Label>
@@ -550,9 +711,7 @@ def gold():
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setDeployModal(false)}>Cancel</Button>
-                <Button disabled={confirmName !== pipelineName} onClick={handleDeploy}>
-                  Deploy
-                </Button>
+                <Button disabled={confirmName !== pipelineName} onClick={handleDeploy}>Deploy</Button>
               </DialogFooter>
             </>
           ) : (
