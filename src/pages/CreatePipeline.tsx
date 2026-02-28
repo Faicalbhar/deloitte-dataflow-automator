@@ -346,26 +346,34 @@ const CreatePipeline = () => {
             <Card>
               <CardHeader className="pb-2 flex flex-row items-center justify-between">
                 <CardTitle className="text-sm">Transformations</CardTitle>
-                <div className="flex gap-2">
-                  <Select onValueChange={(v) => addTransformation(v as TransformationType)}>
-                    <SelectTrigger className="h-8 w-48 text-xs">
-                      <SelectValue placeholder="+ Add transformation" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableTransformationTypes.map((t) => (
-                        <SelectItem key={t.type} value={t.type}>
-                          <div>
-                            <span className="font-medium">{t.label}</span>
-                            <span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span>
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button variant="outline" size="sm" className="gap-1 text-xs" onClick={() => setAiOpen(true)}>
-                    <Bot className="h-3.5 w-3.5" /> AI Assistant
-                  </Button>
-                </div>
+                <Select onValueChange={(v) => {
+                  if (v === '__ai_assistant__') {
+                    setAiOpen(true);
+                  } else {
+                    addTransformation(v as TransformationType);
+                  }
+                }}>
+                  <SelectTrigger className="h-8 w-52 text-xs">
+                    <SelectValue placeholder="+ Add transformation" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableTransformationTypes.map((t) => (
+                      <SelectItem key={t.type} value={t.type}>
+                        <div>
+                          <span className="font-medium">{t.label}</span>
+                          <span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                    <SelectItem value="__ai_assistant__">
+                      <div className="flex items-center gap-1">
+                        <Bot className="h-3.5 w-3.5" />
+                        <span className="font-medium">AI Assistant</span>
+                        <span className="text-muted-foreground ml-1 text-[10px]">Natural language</span>
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </CardHeader>
               <CardContent className="space-y-2">
                 {transformations.length === 0 ? (

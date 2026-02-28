@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, GitBranch, PlusCircle, Database, ShieldAlert,
-  Settings, BookOpen,
+  Settings,
 } from 'lucide-react';
 import { NavLink } from '@/components/NavLink';
 import { useLocation } from 'react-router-dom';
@@ -16,7 +16,6 @@ const navItems = [
   { title: 'Data Catalog', url: '/data-catalog', icon: Database },
   { title: 'Quarantine', url: '/quarantine', icon: ShieldAlert },
   { title: 'Settings', url: '/settings', icon: Settings },
-  { title: 'Documentation', url: '/documentation', icon: BookOpen },
 ];
 
 export function AppSidebar() {

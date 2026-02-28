@@ -10,7 +10,6 @@ const pageTitles: Record<string, string> = {
   '/data-catalog': 'Data Catalog',
   '/quarantine': 'Quarantine',
   '/settings': 'Settings',
-  '/documentation': 'Documentation',
 };
 
 export function AppLayout() {
