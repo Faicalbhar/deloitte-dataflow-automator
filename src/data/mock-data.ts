@@ -2,11 +2,29 @@ import type { Pipeline, PipelineRun, SchemaColumn, QualityRule, QuarantineRecord
 
 export const currentUser: User = {
   id: '1',
-  name: 'Sarah Chen',
-  email: 'sarah.chen@deloitte.com',
+  name: 'Faical Mohamed',
+  email: 'faical.mohamed@deloitte.com',
   avatar: undefined,
   role: 'Data Engineer',
 };
+
+export type Notification = {
+  id: string;
+  title: string;
+  message: string;
+  type: 'success' | 'error' | 'warning' | 'info';
+  read: boolean;
+  createdAt: string;
+  pipelineId?: string;
+};
+
+export const mockNotifications: Notification[] = [
+  { id: 'n1', title: 'Pipeline Succeeded', message: 'Client Transactions ETL completed — 143,800 rows written', type: 'success', read: false, createdAt: '2025-02-26T06:12:00Z', pipelineId: 'p1' },
+  { id: 'n2', title: 'Pipeline Failed', message: 'Regulatory Reporting failed after 5m — schema mismatch detected', type: 'error', read: false, createdAt: '2025-02-25T14:05:00Z', pipelineId: 'p3' },
+  { id: 'n3', title: 'Quarantine Alert', message: 'Client Transactions ETL: 10,000 rows quarantined (6.7% rejection rate)', type: 'warning', read: false, createdAt: '2025-02-24T06:15:00Z', pipelineId: 'p1' },
+  { id: 'n4', title: 'Pipeline Deployed', message: 'Customer Master Data successfully deployed to production', type: 'info', read: true, createdAt: '2025-02-24T10:00:00Z', pipelineId: 'p4' },
+  { id: 'n5', title: 'Pipeline Succeeded', message: 'Risk Assessment Feed completed — 11,900 rows written', type: 'success', read: true, createdAt: '2025-02-23T08:03:00Z', pipelineId: 'p2' },
+];
 
 const users: User[] = [
   currentUser,
