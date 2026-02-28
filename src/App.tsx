@@ -14,7 +14,7 @@ import EditPipeline from "@/pages/EditPipeline";
 import DataCatalog from "@/pages/DataCatalog";
 import Quarantine from "@/pages/Quarantine";
 import SettingsPage from "@/pages/SettingsPage";
-import Documentation from "@/pages/Documentation";
+
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -47,7 +47,7 @@ function AppRoutes() {
         <Route path="data-catalog" element={<DataCatalog />} />
         <Route path="quarantine" element={<Quarantine />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="documentation" element={<Documentation />} />
+        
       </Route>
       <Route path="*" element={<NotFound />} />
     </Routes>
