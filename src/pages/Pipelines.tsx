@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Search, Plus, Play, Copy, Pencil, Trash2, Eye } from 'lucide-react';
+import { Search, Plus, Pencil, Square, Eye } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -9,7 +9,6 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useNavigate } from 'react-router-dom';
 import { mockPipelines } from '@/data/mock-data';
-import { formatDistanceToNow } from 'date-fns';
 import { toast } from 'sonner';
 import type { PipelineStatus } from '@/types';
 
@@ -58,7 +57,6 @@ const Pipelines = () => {
                   <TableHead>Name</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Environment</TableHead>
-                  <TableHead>Last Execution</TableHead>
                   <TableHead>Owner</TableHead>
                   <TableHead>Transformations</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -76,11 +74,6 @@ const Pipelines = () => {
                       <TableCell><Badge className={sb.className}>{sb.label}</Badge></TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-xs">{p.environment}</Badge>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground text-sm">
-                        {p.lastExecution
-                          ? formatDistanceToNow(new Date(p.lastExecution.startedAt), { addSuffix: true })
-                          : '—'}
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
@@ -109,32 +102,18 @@ const Pipelines = () => {
                                 <Pencil className="h-3.5 w-3.5" />
                               </Button>
                             </TooltipTrigger>
-                            <TooltipContent>Edit transformations</TooltipContent>
+                            <TooltipContent>Edit pipeline</TooltipContent>
                           </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toast.success(`Pipeline "${p.name}" duplicated`)}>
-                                <Copy className="h-3.5 w-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Duplicate</TooltipContent>
-                          </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toast.info(`Pipeline "${p.name}" triggered`)}>
-                                <Play className="h-3.5 w-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Run now</TooltipContent>
-                          </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => toast.error(`Pipeline "${p.name}" deleted`)}>
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Delete</TooltipContent>
-                          </Tooltip>
+                          {p.status === 'running' && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => toast.info(`Pipeline "${p.name}" stopped`)}>
+                                  <Square className="h-3.5 w-3.5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Stop pipeline</TooltipContent>
+                            </Tooltip>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
