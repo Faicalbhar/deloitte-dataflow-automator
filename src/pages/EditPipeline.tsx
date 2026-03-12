@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Save, Plus, Trash2, GripVertical, Bot, Send, Code, ArrowRight
+  ArrowLeft, Save, Plus, Trash2, GripVertical, Send, Code, ArrowRight, Sparkles
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -44,9 +44,10 @@ const EditPipeline = () => {
   const [transformations, setTransformations] = useState<Transformation[]>(pipeline?.transformations || []);
   const [aiOpen, setAiOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', content: "Hi! I can help you modify transformations. Try:\n- \"Filter rows where amount > 1000\"\n- \"Rename column X to Y\"\n- \"Add a composite key column\"" }
+    { role: 'assistant', content: "👋 I'm your AI Transformation Agent. Describe what transformations you need in natural language.\n\nExamples:\n• \"Filter cancelled rows, rename transaction_date to txn_date\"\n• \"Cast amount to DECIMAL and deduplicate by transaction_id\"\n• \"Aggregate total amount by client_id, sort by date DESC\"" }
   ]);
   const [chatInput, setChatInput] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
 
   // Review & Deploy state
   const [partitions, setPartitions] = useState<string[]>(['default_output']);
@@ -92,27 +93,55 @@ const EditPipeline = () => {
     const userMsg = chatInput.trim();
     setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setChatInput('');
+    setAiLoading(true);
+
     setTimeout(() => {
-      let response = '';
-      let newT: Transformation | null = null;
-      if (userMsg.toLowerCase().includes('filter')) {
-        newT = { id: `t-${Date.now()}`, order: transformations.length + 1, type: 'filter', config: { condition: "status != 'cancelled'" }, sourceColumns: ['status'], description: "Filter cancelled rows" };
-        response = "✅ Added a Filter transformation.";
-      } else if (userMsg.toLowerCase().includes('rename')) {
-        newT = { id: `t-${Date.now()}`, order: transformations.length + 1, type: 'rename', config: { newName: 'txn_date' }, sourceColumns: ['transaction_date'], targetColumn: 'txn_date', description: "Rename transaction_date" };
-        response = "✅ Added a Rename transformation.";
-      } else if (userMsg.toLowerCase().includes('aggregate') || userMsg.toLowerCase().includes('group')) {
-        newT = { id: `t-${Date.now()}`, order: transformations.length + 1, type: 'aggregate', config: { groupBy: ['client_id'], aggregations: [{ column: 'amount', func: 'SUM', alias: 'total_amount' }] }, sourceColumns: ['client_id', 'amount'], targetColumn: 'total_amount', description: "Aggregate total amount by client" };
-        response = "✅ Added an Aggregate transformation.";
-      } else if (userMsg.toLowerCase().includes('add') || userMsg.toLowerCase().includes('concat')) {
-        newT = { id: `t-${Date.now()}`, order: transformations.length + 1, type: 'add_column', config: { expression: "CONCAT(client_id, '-', transaction_id)" }, sourceColumns: ['client_id', 'transaction_id'], targetColumn: 'composite_key', description: "Create composite key" };
-        response = "✅ Added an Add Column transformation.";
-      } else {
-        response = "Could you be more specific? Try: \"Filter rows where...\", \"Rename column X to Y\", etc.";
+      const lower = userMsg.toLowerCase();
+      const newTransformations: Transformation[] = [];
+
+      if (lower.includes('filter')) {
+        const cond = lower.includes('cancel') ? "status != 'cancelled'" : lower.includes('amount') ? 'amount > 0' : "status = 'completed'";
+        newTransformations.push({ id: `t-${Date.now()}-f`, order: transformations.length + newTransformations.length + 1, type: 'filter', config: { condition: cond }, sourceColumns: ['status'], description: `Filter: ${cond}` });
       }
-      if (newT) setTransformations(prev => [...prev, newT!]);
+      if (lower.includes('rename')) {
+        const src = lower.includes('transaction_date') ? 'transaction_date' : columns[0]?.name || 'column';
+        const tgt = lower.includes('txn_date') ? 'txn_date' : 'renamed_col';
+        newTransformations.push({ id: `t-${Date.now()}-r`, order: transformations.length + newTransformations.length + 1, type: 'rename', config: { newName: tgt }, sourceColumns: [src], targetColumn: tgt, description: `Rename ${src} → ${tgt}` });
+      }
+      if (lower.includes('cast')) {
+        const col = lower.includes('amount') ? 'amount' : columns[0]?.name || 'column';
+        const typ = lower.includes('decimal') ? 'DECIMAL' : lower.includes('integer') ? 'INTEGER' : 'STRING';
+        newTransformations.push({ id: `t-${Date.now()}-c`, order: transformations.length + newTransformations.length + 1, type: 'cast', config: { targetType: typ }, sourceColumns: [col], targetColumn: col, description: `Cast ${col} to ${typ}` });
+      }
+      if (lower.includes('deduplic') || lower.includes('duplicate')) {
+        newTransformations.push({ id: `t-${Date.now()}-dd`, order: transformations.length + newTransformations.length + 1, type: 'deduplicate', config: { columns: ['transaction_id'] }, sourceColumns: ['transaction_id'], description: 'Remove duplicate rows' });
+      }
+      if (lower.includes('aggregate') || lower.includes('group')) {
+        const grp = lower.includes('client') ? 'client_id' : columns[0]?.name || 'id';
+        newTransformations.push({ id: `t-${Date.now()}-a`, order: transformations.length + newTransformations.length + 1, type: 'aggregate', config: { groupBy: [grp], aggregations: [{ column: 'amount', func: 'SUM', alias: 'total_amount' }] }, sourceColumns: [grp, 'amount'], targetColumn: 'total_amount', description: `Aggregate amount by ${grp}` });
+      }
+      if (lower.includes('drop')) {
+        const col = lower.includes('email') ? 'email' : 'client_name';
+        newTransformations.push({ id: `t-${Date.now()}-d`, order: transformations.length + newTransformations.length + 1, type: 'drop_column', config: {}, sourceColumns: [col], description: `Drop column ${col}` });
+      }
+      if (lower.includes('sort') || lower.includes('order')) {
+        const col = lower.includes('date') ? 'transaction_date' : 'amount';
+        newTransformations.push({ id: `t-${Date.now()}-s`, order: transformations.length + newTransformations.length + 1, type: 'sort', config: { direction: 'DESC' }, sourceColumns: [col], description: `Sort by ${col} DESC` });
+      }
+      if (lower.includes('add') && lower.includes('column')) {
+        newTransformations.push({ id: `t-${Date.now()}-ac`, order: transformations.length + newTransformations.length + 1, type: 'add_column', config: { expression: "CONCAT(client_id, '-', transaction_id)" }, sourceColumns: ['client_id', 'transaction_id'], targetColumn: 'composite_key', description: 'Create composite key' });
+      }
+
+      let response: string;
+      if (newTransformations.length > 0) {
+        setTransformations(prev => [...prev, ...newTransformations]);
+        response = `✅ Created **${newTransformations.length} transformation(s)**:\n\n${newTransformations.map((t, i) => `${i + 1}. **${t.type.replace('_', ' ').toUpperCase()}** — ${t.description}`).join('\n')}\n\nYou can edit each one or ask me for more.`;
+      } else {
+        response = "I couldn't identify transformations. Try:\n• \"Filter rows where status is cancelled\"\n• \"Rename transaction_date to txn_date, cast amount to DECIMAL\"\n• \"Aggregate amount by client_id, deduplicate, sort by date\"";
+      }
       setChatMessages(prev => [...prev, { role: 'assistant', content: response }]);
-    }, 600);
+      setAiLoading(false);
+    }, 1200);
   };
 
   const generateJson = () => ({
@@ -203,29 +232,29 @@ const EditPipeline = () => {
             <Card>
               <CardHeader className="pb-2 flex flex-row items-center justify-between">
                 <CardTitle className="text-sm">Transformations</CardTitle>
-                <Select onValueChange={(v) => {
-                  if (v === '__ai_assistant__') setAiOpen(true);
-                  else addTransformation(v as TransformationType);
-                }}>
-                  <SelectTrigger className="h-8 w-52 text-xs">
-                    <SelectValue placeholder="+ Add transformation" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableTransformationTypes.map((t) => (
-                      <SelectItem key={t.type} value={t.type}>
-                        <div><span className="font-medium">{t.label}</span><span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span></div>
-                      </SelectItem>
-                    ))}
-                    <SelectItem value="__ai_assistant__">
-                      <div className="flex items-center gap-1"><Bot className="h-3.5 w-3.5" /><span className="font-medium">AI Assistant</span><span className="text-muted-foreground ml-1 text-[10px]">Natural language</span></div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="flex gap-2">
+                  <Select onValueChange={(v) => addTransformation(v as TransformationType)}>
+                    <SelectTrigger className="h-8 w-44 text-xs">
+                      <Plus className="h-3.5 w-3.5 mr-1" />
+                      <SelectValue placeholder="Add transformation" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableTransformationTypes.map((t) => (
+                        <SelectItem key={t.type} value={t.type}>
+                          <div><span className="font-medium">{t.label}</span><span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span></div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button variant="outline" size="sm" className="gap-2 h-8 text-xs" onClick={() => setAiOpen(true)}>
+                    <Sparkles className="h-3.5 w-3.5 text-primary" /> AI Agent
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="space-y-2">
                 {transformations.length === 0 ? (
                   <div className="border border-dashed rounded-lg p-8 text-center text-muted-foreground">
-                    <p className="text-sm">No transformations. Use the dropdown above or AI assistant.</p>
+                    <p className="text-sm">No transformations. Use the dropdown above or AI Agent.</p>
                   </div>
                 ) : (
                   transformations.map((t) => (
@@ -258,7 +287,7 @@ const EditPipeline = () => {
                               <div><Label className="text-[10px]">Target Type</Label>
                                 <Select value={(t.config.targetType as string) || ''} onValueChange={(v) => updateTransformation(t.id, { config: { ...t.config, targetType: v } })}>
                                   <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
-                                  <SelectContent>{['STRING','INTEGER','DECIMAL','DATE','BOOLEAN'].map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+                                  <SelectContent>{['STRING','INTEGER','DECIMAL','DATE','BOOLEAN'].map(tp => <SelectItem key={tp} value={tp}>{tp}</SelectItem>)}</SelectContent>
                                 </Select>
                               </div>
                             )}
@@ -322,7 +351,7 @@ const EditPipeline = () => {
           {/* Partitions */}
           <div className="space-y-2">
             <Label>Output Partition(s)</Label>
-            <p className="text-xs text-muted-foreground">Define output table names. Your transformations may produce one or multiple tables.</p>
+            <p className="text-xs text-muted-foreground">Define output table names.</p>
             <div className="space-y-2">
               {partitions.map((p, i) => (
                 <div key={i} className="flex gap-2">
@@ -428,13 +457,16 @@ const EditPipeline = () => {
         </DialogContent>
       </Dialog>
 
-      {/* AI Assistant */}
+      {/* AI Agent Sheet */}
       <Sheet open={aiOpen} onOpenChange={setAiOpen}>
-        <SheetContent className="sm:max-w-md flex flex-col">
+        <SheetContent className="sm:max-w-lg flex flex-col">
           <SheetHeader>
             <SheetTitle className="flex items-center gap-2">
-              <Bot className="h-5 w-5 text-primary" /> AI Transformation Assistant
+              <Sparkles className="h-5 w-5 text-primary" /> AI Transformation Agent
             </SheetTitle>
+            <p className="text-xs text-muted-foreground">
+              Describe transformations in natural language. The agent creates them automatically.
+            </p>
           </SheetHeader>
           <ScrollArea className="flex-1 mt-4 pr-4">
             <div className="space-y-4">
@@ -445,11 +477,28 @@ const EditPipeline = () => {
                   </div>
                 </div>
               ))}
+              {aiLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-muted rounded-lg px-4 py-3 flex items-center gap-2">
+                    <div className="h-3 w-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                    <span className="text-xs text-muted-foreground">Generating transformations...</span>
+                  </div>
+                </div>
+              )}
             </div>
           </ScrollArea>
           <div className="flex gap-2 mt-4 pt-4 border-t">
-            <Input placeholder="Describe a transformation..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendChat()} className="text-sm" />
-            <Button size="icon" onClick={handleSendChat}><Send className="h-4 w-4" /></Button>
+            <Input
+              placeholder="e.g. Filter cancelled rows, rename transaction_date..."
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !aiLoading && handleSendChat()}
+              className="text-sm"
+              disabled={aiLoading}
+            />
+            <Button size="icon" onClick={handleSendChat} disabled={aiLoading || !chatInput.trim()}>
+              <Send className="h-4 w-4" />
+            </Button>
           </div>
         </SheetContent>
       </Sheet>
