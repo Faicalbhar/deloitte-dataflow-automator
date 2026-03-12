@@ -3,7 +3,7 @@ import {
   Upload, FileSpreadsheet, Check, X, HelpCircle, ArrowLeft, ArrowRight, Save,
   Plus, Trash2, GripVertical, Send, Code, CheckCircle2, XCircle, Download, Eye,
   Square, Pause, Play, RotateCcw, Sparkles, FileSearch, AlertTriangle, Database,
-  ArrowRightCircle, Layers, ChevronRight
+  ArrowRightCircle, Layers, ChevronRight, Clock, Cpu, Server, Activity, Terminal
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -42,12 +42,12 @@ interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 interface DbfsFile {
   name: string;
   path: string;
-  matchPercent: number;
   size: string;
   lastModified: string;
-  missingColumns: string[];
-  extraColumns: string[];
-  status: 'conforming' | 'rejected';
+  totalRows: number;
+  validRows: number;
+  rescuedRows: number;
+  rescueReasons: { reason: string; count: number }[];
 }
 
 const CreatePipeline = () => {
@@ -90,7 +90,12 @@ const CreatePipeline = () => {
   const [execStep, setExecStep] = useState(0);
   const [execError, setExecError] = useState<string | null>(null);
   const [execLogs, setExecLogs] = useState<string[]>([]);
-  const [jobDetails, setJobDetails] = useState<{ jobId: string; clusterId: string; startTime: string } | null>(null);
+  const [jobDetails, setJobDetails] = useState<{
+    jobId: string; runId: string; clusterId: string; clusterName: string;
+    startTime: string; endTime?: string; sparkUiUrl: string;
+    driverType: string; workerType: string; numWorkers: number;
+    tasks: { name: string; status: 'pending' | 'running' | 'completed' | 'failed'; duration?: string; recordsIn?: number; recordsOut?: number }[];
+  } | null>(null);
 
   // Get/set transformations for active layer
   const getLayerTransformations = useCallback((layer: DagLayer) => {
@@ -142,24 +147,50 @@ const CreatePipeline = () => {
     setSelectedFiles([]);
 
     setTimeout(() => {
+      // Only files matching the file mask are returned. Files not matching are simply not shown.
+      // Each file is then validated row-by-row against the data contract.
+      // Rows not matching → rescued (quarantined) with reasons.
       const mockFiles: DbfsFile[] = [
-        { name: 'transactions_2025_01.csv', path: '/mnt/data/raw/transactions_2025_01.csv', matchPercent: 100, size: '245 MB', lastModified: '2025-02-20', missingColumns: [], extraColumns: [], status: 'conforming' },
-        { name: 'transactions_2025_02.csv', path: '/mnt/data/raw/transactions_2025_02.csv', matchPercent: 95, size: '312 MB', lastModified: '2025-02-25', missingColumns: ['currency'], extraColumns: [], status: 'conforming' },
-        { name: 'transactions_2024_12.csv', path: '/mnt/data/raw/transactions_2024_12.csv', matchPercent: 88, size: '198 MB', lastModified: '2025-01-05', missingColumns: ['currency', 'is_verified'], extraColumns: ['legacy_flag'], status: 'conforming' },
-        { name: 'transactions_corrupt.csv', path: '/mnt/data/raw/transactions_corrupt.csv', matchPercent: 35, size: '89 MB', lastModified: '2025-02-18', missingColumns: ['transaction_id', 'amount', 'transaction_date', 'status'], extraColumns: ['unknown_col1', 'unknown_col2'], status: 'rejected' },
-        { name: 'client_data_2025.csv', path: '/mnt/data/raw/client_data_2025.csv', matchPercent: 22, size: '67 MB', lastModified: '2025-02-10', missingColumns: ['transaction_id', 'amount', 'transaction_date', 'status', 'client_id'], extraColumns: ['address', 'phone', 'zip'], status: 'rejected' },
+        {
+          name: 'transactions_2025_01.csv', path: '/mnt/data/raw/transactions_2025_01.csv',
+          size: '245 MB', lastModified: '2025-02-20', totalRows: 48500, validRows: 48500, rescuedRows: 0, rescueReasons: []
+        },
+        {
+          name: 'transactions_2025_02.csv', path: '/mnt/data/raw/transactions_2025_02.csv',
+          size: '312 MB', lastModified: '2025-02-25', totalRows: 62300, validRows: 61450, rescuedRows: 850,
+          rescueReasons: [
+            { reason: 'Column "amount" is NULL — violates NOT NULL constraint', count: 520 },
+            { reason: 'Column "amount" value -350 out of range [0, 1000000]', count: 180 },
+            { reason: 'Column "status" value "unknown" not in allowed set', count: 150 },
+          ]
+        },
+        {
+          name: 'transactions_2024_12.csv', path: '/mnt/data/raw/transactions_2024_12.csv',
+          size: '198 MB', lastModified: '2025-01-05', totalRows: 39800, validRows: 38200, rescuedRows: 1600,
+          rescueReasons: [
+            { reason: 'Column "amount" is NULL — violates NOT NULL constraint', count: 800 },
+            { reason: 'Column "email" format invalid — does not match regex', count: 450 },
+            { reason: 'Column "transaction_id" duplicate found — violates uniqueness', count: 350 },
+          ]
+        },
+        {
+          name: 'transactions_2024_11.csv', path: '/mnt/data/raw/transactions_2024_11.csv',
+          size: '175 MB', lastModified: '2024-12-05', totalRows: 35200, validRows: 34800, rescuedRows: 400,
+          rescueReasons: [
+            { reason: 'Column "client_id" is empty string — treated as NULL', count: 250 },
+            { reason: 'Column "amount" value 99999999 exceeds maximum 1000000', count: 150 },
+          ]
+        },
       ];
       setDbfsFiles(mockFiles);
-      const conforming = mockFiles.filter(f => f.status === 'conforming');
-      setSelectedFiles(conforming.map(f => f.path));
+      setSelectedFiles(mockFiles.map(f => f.path));
       setSearching(false);
-      toast.success(`Found ${mockFiles.length} files — ${conforming.length} conforming, ${mockFiles.length - conforming.length} rejected`);
+      const totalRescued = mockFiles.reduce((s, f) => s + f.rescuedRows, 0);
+      toast.success(`Found ${mockFiles.length} files matching "${fileMask}" — ${totalRescued.toLocaleString()} rows will be rescued to quarantine`);
     }, 1500);
   };
 
   const toggleFileSelection = (path: string) => {
-    const f = dbfsFiles.find(x => x.path === path);
-    if (f?.status === 'rejected') return;
     setSelectedFiles(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
   };
 
@@ -249,24 +280,74 @@ const CreatePipeline = () => {
   };
 
   // Execution
-  const execSteps = ['Validating configuration', 'Generating DLT notebook', 'Creating Databricks job', 'Submitting to cluster', 'Running Bronze layer', 'Running Silver transformations', 'Running quality expectations', 'Writing Gold output', 'Finalizing tables'];
+  const execSteps = ['Validating configuration', 'Generating DLT notebook', 'Creating Databricks job', 'Provisioning cluster', 'Installing libraries', 'Running Bronze layer', 'Running Silver transformations', 'Applying quality expectations', 'Writing Gold output', 'Updating Unity Catalog', 'Finalizing tables'];
 
   const startExecution = async () => {
     setExecStatus('running');
     setExecError(null);
     setExecLogs([]);
+    const jid = `job-${Math.floor(Math.random() * 90000) + 10000}`;
+    const rid = `run-${Math.floor(Math.random() * 900000) + 100000}`;
+    const cid = `0226-${Math.floor(Math.random() * 9000) + 1000}-abcd${Math.floor(Math.random() * 100)}`;
     setJobDetails({
-      jobId: `job-${Math.floor(Math.random() * 90000) + 10000}`,
-      clusterId: `cluster-${Math.floor(Math.random() * 9000) + 1000}`,
-      startTime: new Date().toLocaleString(),
+      jobId: jid, runId: rid, clusterId: cid,
+      clusterName: `dlt-pipeline-${pipelineName || 'unnamed'}`,
+      startTime: new Date().toISOString(),
+      sparkUiUrl: `https://adb-1234567890.azuredatabricks.net/#/setting/clusters/${cid}/sparkUi`,
+      driverType: 'Standard_DS3_v2 (14 GB, 4 Cores)',
+      workerType: 'Standard_DS3_v2 (14 GB, 4 Cores)',
+      numWorkers: 2,
+      tasks: [
+        { name: 'bronze_ingestion', status: 'pending' },
+        { name: 'silver_transformations', status: 'pending' },
+        { name: 'quality_expectations', status: 'pending' },
+        { name: 'gold_aggregations', status: 'pending' },
+        { name: 'catalog_update', status: 'pending' },
+      ],
     });
 
+    const totalSelected = dbfsFiles.filter(f => selectedFiles.includes(f.path));
+    const totalRows = totalSelected.reduce((s, f) => s + f.totalRows, 0);
+    const totalValid = totalSelected.reduce((s, f) => s + f.validRows, 0);
+    const totalRescued = totalSelected.reduce((s, f) => s + f.rescuedRows, 0);
+
+    setExecLogs(prev => [...prev,
+      `[${new Date().toLocaleTimeString()}] Pipeline "${pipelineName}" starting...`,
+      `[${new Date().toLocaleTimeString()}] Job ID: ${jid} | Run ID: ${rid}`,
+      `[${new Date().toLocaleTimeString()}] Cluster: ${cid} (${2} workers × Standard_DS3_v2)`,
+    ]);
+
     for (let i = 0; i < execSteps.length; i++) {
+      if (execStatus === 'failed') return;
       setExecStep(i);
+
+      // Update task statuses
+      setJobDetails(prev => {
+        if (!prev) return prev;
+        const tasks = [...prev.tasks];
+        if (i >= 5 && i <= 5) tasks[0] = { ...tasks[0], status: i === 5 ? 'running' : 'completed', recordsIn: totalRows, recordsOut: totalValid };
+        if (i > 5) tasks[0] = { ...tasks[0], status: 'completed', duration: '2m 14s', recordsIn: totalRows, recordsOut: totalValid };
+        if (i >= 6 && i <= 6) tasks[1] = { ...tasks[1], status: 'running' };
+        if (i > 6) tasks[1] = { ...tasks[1], status: 'completed', duration: '3m 42s', recordsIn: totalValid, recordsOut: totalValid };
+        if (i >= 7 && i <= 7) tasks[2] = { ...tasks[2], status: 'running' };
+        if (i > 7) tasks[2] = { ...tasks[2], status: 'completed', duration: '1m 08s', recordsIn: totalValid, recordsOut: totalValid - totalRescued };
+        if (i >= 8 && i <= 8) tasks[3] = { ...tasks[3], status: 'running' };
+        if (i > 8) tasks[3] = { ...tasks[3], status: 'completed', duration: '2m 31s', recordsIn: totalValid - totalRescued, recordsOut: totalValid - totalRescued };
+        if (i >= 9) tasks[4] = { ...tasks[4], status: i === 9 ? 'running' : 'completed', duration: i > 9 ? '0m 12s' : undefined };
+        return { ...prev, tasks };
+      });
+
       setExecLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${execSteps[i]}...`]);
       await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
     }
-    setExecLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ✓ Pipeline completed — all tables written.`]);
+
+    setJobDetails(prev => prev ? { ...prev, endTime: new Date().toISOString() } : prev);
+    setExecLogs(prev => [...prev,
+      `[${new Date().toLocaleTimeString()}] ✓ All tasks completed successfully`,
+      `[${new Date().toLocaleTimeString()}] Total rows processed: ${totalRows.toLocaleString()}`,
+      `[${new Date().toLocaleTimeString()}] Rows written: ${totalValid.toLocaleString()} | Rescued: ${totalRescued.toLocaleString()}`,
+      `[${new Date().toLocaleTimeString()}] Output: ${outputPath}${outputTableName}`,
+    ]);
     setExecStatus('success');
   };
 
@@ -288,8 +369,8 @@ const CreatePipeline = () => {
     },
   });
 
-  const conformingFiles = dbfsFiles.filter(f => f.status === 'conforming');
-  const rejectedFiles = dbfsFiles.filter(f => f.status === 'rejected');
+  const totalRescuedRows = dbfsFiles.filter(f => selectedFiles.includes(f.path)).reduce((s, f) => s + f.rescuedRows, 0);
+  const totalValidRows = dbfsFiles.filter(f => selectedFiles.includes(f.path)).reduce((s, f) => s + f.validRows, 0);
   const canNext = step === 0 ? (fileValid && selectedFiles.length > 0) : step === 1 ? true : step === 2 ? !!pipelineName && !!outputTableName : false;
 
   // DAG layer config
@@ -300,7 +381,6 @@ const CreatePipeline = () => {
     { key: 'gold', label: 'Gold', icon: <Layers className="h-5 w-5" />, color: 'text-yellow-500', bgColor: 'bg-yellow-500/10', borderColor: 'border-yellow-500/40' },
   ];
 
-  // Current active layer transformations
   const currentTransformations = activeLayer ? getLayerTransformations(activeLayer) : [];
 
   return (
@@ -362,7 +442,10 @@ const CreatePipeline = () => {
                 <FileSearch className="h-4 w-4" /> 2. File Mask — Search DBFS
                 <Tooltip>
                   <TooltipTrigger><HelpCircle className="h-3.5 w-3.5 text-muted-foreground" /></TooltipTrigger>
-                  <TooltipContent className="max-w-xs">Enter a file mask pattern. The backend searches DBFS for all matching files, compares each against the data contract. Conforming files proceed, non-conforming are rejected (visible in Quarantine).</TooltipContent>
+                  <TooltipContent className="max-w-xs">
+                    Enter a file mask pattern (e.g. transactions_*.csv). Only files matching this pattern are returned from DBFS.
+                    Each file is then validated row-by-row against the data contract. Rows that don't match are rescued to Quarantine.
+                  </TooltipContent>
                 </Tooltip>
               </CardTitle>
             </CardHeader>
@@ -380,63 +463,84 @@ const CreatePipeline = () => {
                   Search DBFS
                 </Button>
               </div>
+              {file && (
+                <p className="text-xs text-muted-foreground">
+                  Files not matching this pattern are excluded. Matching files are validated against the data contract — non-conforming <strong>rows</strong> are rescued to Quarantine.
+                </p>
+              )}
             </CardContent>
           </Card>
 
-          {/* Conforming Files */}
-          {conformingFiles.length > 0 && (
-            <Card className="border-success/30">
+          {/* Matched Files */}
+          {dbfsFiles.length > 0 && (
+            <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2 text-success">
-                  <CheckCircle2 className="h-4 w-4" /> Conforming Files — {conformingFiles.length} file(s) match data contract
+                <CardTitle className="text-base flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-success" /> {dbfsFiles.length} file(s) match "{fileMask}"
                 </CardTitle>
-                <p className="text-xs text-muted-foreground">These files match the file mask and conform to the data contract. Select which ones to include in the pipeline.</p>
+                <p className="text-xs text-muted-foreground">
+                  Each file is validated against the data contract. Rows that don't conform are <strong>rescued</strong> (quarantined) with the reason — like Databricks <code className="bg-muted px-1 rounded">_rescued_data</code>.
+                </p>
               </CardHeader>
               <CardContent className="p-0">
                 <Table>
                   <TableHeader>
-                    <TableRow className="bg-success/5">
+                    <TableRow className="bg-muted/50">
                       <TableHead className="text-xs w-10"></TableHead>
                       <TableHead className="text-xs">File</TableHead>
-                      <TableHead className="text-xs">Match</TableHead>
+                      <TableHead className="text-xs text-right">Total Rows</TableHead>
+                      <TableHead className="text-xs text-right">Valid</TableHead>
+                      <TableHead className="text-xs text-right">Rescued</TableHead>
                       <TableHead className="text-xs">Size</TableHead>
                       <TableHead className="text-xs">Modified</TableHead>
-                      <TableHead className="text-xs">Notes</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {conformingFiles.map((f) => (
-                      <TableRow
-                        key={f.path}
-                        className={`cursor-pointer transition-colors ${selectedFiles.includes(f.path) ? 'bg-success/10' : 'hover:bg-muted/30'}`}
-                        onClick={() => toggleFileSelection(f.path)}
-                      >
-                        <TableCell>
-                          <input
-                            type="checkbox"
-                            checked={selectedFiles.includes(f.path)}
-                            onChange={() => toggleFileSelection(f.path)}
-                            className="rounded border-input"
-                          />
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">{f.name}</TableCell>
-                        <TableCell>
-                          <Badge className="bg-success text-success-foreground text-[10px]">{f.matchPercent}%</Badge>
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{f.size}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{f.lastModified}</TableCell>
-                        <TableCell>
-                          {f.missingColumns.length > 0 ? (
-                            <div className="flex flex-wrap gap-1">
-                              {f.missingColumns.map(c => (
-                                <Badge key={c} variant="outline" className="text-[10px] text-warning border-warning/30">missing: {c}</Badge>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-success">Full match</span>
-                          )}
-                        </TableCell>
-                      </TableRow>
+                    {dbfsFiles.map((f) => (
+                      <>
+                        <TableRow
+                          key={f.path}
+                          className={`cursor-pointer transition-colors ${selectedFiles.includes(f.path) ? 'bg-success/5' : 'hover:bg-muted/30'}`}
+                          onClick={() => toggleFileSelection(f.path)}
+                        >
+                          <TableCell>
+                            <input type="checkbox" checked={selectedFiles.includes(f.path)} onChange={() => toggleFileSelection(f.path)} className="rounded border-input" />
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">{f.name}</TableCell>
+                          <TableCell className="text-xs text-right font-medium">{f.totalRows.toLocaleString()}</TableCell>
+                          <TableCell className="text-xs text-right text-success font-medium">{f.validRows.toLocaleString()}</TableCell>
+                          <TableCell className="text-xs text-right">
+                            {f.rescuedRows > 0 ? (
+                              <Badge variant="outline" className="text-[10px] text-warning border-warning/30">
+                                <AlertTriangle className="h-3 w-3 mr-1" />{f.rescuedRows.toLocaleString()}
+                              </Badge>
+                            ) : (
+                              <span className="text-success text-[10px]">0</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{f.size}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{f.lastModified}</TableCell>
+                        </TableRow>
+                        {/* Rescue reasons detail row */}
+                        {f.rescuedRows > 0 && selectedFiles.includes(f.path) && (
+                          <TableRow key={`${f.path}-rescue`} className="bg-warning/5">
+                            <TableCell colSpan={7} className="py-2 px-6">
+                              <div className="flex items-start gap-2">
+                                <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0 mt-0.5" />
+                                <div className="space-y-1">
+                                  <p className="text-[11px] font-medium text-warning">Rescued rows — will be sent to Quarantine:</p>
+                                  {f.rescueReasons.map((r, i) => (
+                                    <div key={i} className="flex items-center gap-2 text-[11px]">
+                                      <Badge variant="outline" className="text-[9px] font-mono">{r.count}</Badge>
+                                      <span className="text-muted-foreground">{r.reason}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </>
                     ))}
                   </TableBody>
                 </Table>
@@ -444,68 +548,20 @@ const CreatePipeline = () => {
             </Card>
           )}
 
-          {/* Rejected Files */}
-          {rejectedFiles.length > 0 && (
-            <Card className="border-destructive/30">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2 text-destructive">
-                  <AlertTriangle className="h-4 w-4" /> Rejected Files — {rejectedFiles.length} file(s) do not match data contract
-                </CardTitle>
-                <p className="text-xs text-muted-foreground">These files matched the file mask but do not conform to the data contract. They are sent to Quarantine for review.</p>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-destructive/5">
-                      <TableHead className="text-xs">File</TableHead>
-                      <TableHead className="text-xs">Match</TableHead>
-                      <TableHead className="text-xs">Size</TableHead>
-                      <TableHead className="text-xs">Missing Columns</TableHead>
-                      <TableHead className="text-xs">Extra Columns</TableHead>
-                      <TableHead className="text-xs">Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rejectedFiles.map((f) => (
-                      <TableRow key={f.path} className="opacity-70">
-                        <TableCell className="font-mono text-xs">{f.name}</TableCell>
-                        <TableCell>
-                          <Badge className="bg-destructive text-destructive-foreground text-[10px]">{f.matchPercent}%</Badge>
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{f.size}</TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1">
-                            {f.missingColumns.map(c => (
-                              <Badge key={c} variant="outline" className="text-[10px] text-destructive border-destructive/30">{c}</Badge>
-                            ))}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1">
-                            {f.extraColumns.map(c => (
-                              <Badge key={c} variant="outline" className="text-[10px] text-muted-foreground">{c}</Badge>
-                            ))}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="text-[10px] text-destructive border-destructive/40">
-                            <XCircle className="h-3 w-3 mr-1" /> Quarantined
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
-          )}
-
+          {/* Summary */}
           {selectedFiles.length > 0 && (
-            <div className="bg-success/10 border border-success/20 rounded-lg p-3 flex items-center gap-3">
-              <CheckCircle2 className="h-5 w-5 text-success shrink-0" />
-              <div className="flex-1">
-                <p className="text-sm font-medium">{selectedFiles.length} file(s) selected for pipeline</p>
-                <p className="text-xs text-muted-foreground">{rejectedFiles.length > 0 ? `${rejectedFiles.length} file(s) rejected → sent to Quarantine` : 'All matching files conform to the data contract'}</p>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-success/10 border border-success/20 rounded-lg p-3 text-center">
+                <p className="text-lg font-bold text-success">{selectedFiles.length}</p>
+                <p className="text-[10px] text-muted-foreground">Files selected</p>
+              </div>
+              <div className="bg-primary/10 border border-primary/20 rounded-lg p-3 text-center">
+                <p className="text-lg font-bold text-primary">{totalValidRows.toLocaleString()}</p>
+                <p className="text-[10px] text-muted-foreground">Valid rows → Pipeline</p>
+              </div>
+              <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 text-center">
+                <p className="text-lg font-bold text-warning">{totalRescuedRows.toLocaleString()}</p>
+                <p className="text-[10px] text-muted-foreground">Rescued → Quarantine</p>
               </div>
             </div>
           )}
@@ -521,11 +577,9 @@ const CreatePipeline = () => {
               <p className="text-xs text-muted-foreground">Click on each layer to configure its transformations. The data flows from Source → Bronze → Silver → Gold.</p>
             </CardHeader>
             <CardContent>
-              {/* DAG Visual */}
               <div className="flex items-center justify-center gap-0 py-8">
                 {dagLayers.map((layer, idx) => (
                   <div key={layer.key} className="flex items-center">
-                    {/* Rectangle Node */}
                     <div
                       className={`relative cursor-pointer transition-all hover:scale-105 border-2 rounded-xl px-6 py-5 min-w-[160px] text-center ${layer.bgColor} ${layer.borderColor} hover:shadow-lg`}
                       onClick={() => layer.key !== 'source' ? setActiveLayer(layer.key) : null}
@@ -534,7 +588,6 @@ const CreatePipeline = () => {
                         {layer.icon}
                         <span className="font-bold text-sm">{layer.label}</span>
                       </div>
-
                       {layer.key === 'source' ? (
                         <div className="space-y-1">
                           <p className="text-xs text-muted-foreground">{selectedFiles.length} file(s)</p>
@@ -556,16 +609,12 @@ const CreatePipeline = () => {
                           <p className="text-[10px] text-muted-foreground mt-1">Click to configure</p>
                         </div>
                       )}
-
-                      {/* Status indicator */}
                       {layer.key !== 'source' && getLayerTransformations(layer.key).length > 0 && (
                         <div className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-success flex items-center justify-center">
                           <Check className="h-3 w-3 text-success-foreground" />
                         </div>
                       )}
                     </div>
-
-                    {/* Connector Arrow */}
                     {idx < dagLayers.length - 1 && (
                       <div className="flex items-center mx-2">
                         <div className="w-8 h-0.5 bg-border" />
@@ -575,8 +624,6 @@ const CreatePipeline = () => {
                   </div>
                 ))}
               </div>
-
-              {/* Summary */}
               <div className="border-t pt-4 mt-4">
                 <div className="grid grid-cols-3 gap-4 text-center">
                   <div className="bg-muted/50 rounded-lg p-3">
@@ -614,7 +661,6 @@ const CreatePipeline = () => {
           </div>
 
           <div className="flex gap-4">
-            {/* Left: Source Columns */}
             <div className="w-1/3 space-y-4">
               <Card>
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Source Columns</CardTitle></CardHeader>
@@ -641,7 +687,6 @@ const CreatePipeline = () => {
               </Card>
             </div>
 
-            {/* Right: Transformation Builder */}
             <div className="flex-1 space-y-4">
               <Card>
                 <CardHeader className="pb-2 flex flex-row items-center justify-between">
@@ -789,7 +834,6 @@ const CreatePipeline = () => {
             <Label>Description</Label>
             <Textarea value={pipelineDesc} onChange={(e) => setPipelineDesc(e.target.value)} placeholder="Describe your pipeline..." />
           </div>
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Output Table Name *</Label>
@@ -800,23 +844,20 @@ const CreatePipeline = () => {
               <Input value={outputPath} onChange={(e) => setOutputPath(e.target.value)} placeholder="/mnt/data/output/" />
             </div>
           </div>
-
           <div className="flex items-center gap-4">
             <Switch checked={scheduled} onCheckedChange={setScheduled} />
             <Label>Enable Scheduling</Label>
             {scheduled && <Input className="w-48" value={cronExpr} onChange={(e) => setCronExpr(e.target.value)} placeholder="cron expression" />}
           </div>
-
           <div className="flex items-center gap-2">
             <Switch checked={notifications} onCheckedChange={setNotifications} />
             <Label className="text-sm">Enable email notifications</Label>
           </div>
 
-          {/* Pipeline Summary */}
           <Card>
             <CardHeader className="pb-2"><CardTitle className="text-sm">Pipeline Summary</CardTitle></CardHeader>
             <CardContent>
-              <div className="grid grid-cols-4 gap-3 mb-4">
+              <div className="grid grid-cols-5 gap-3 mb-4">
                 <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-blue-400">{selectedFiles.length}</p>
                   <p className="text-[10px] text-muted-foreground">Source Files</p>
@@ -832,6 +873,10 @@ const CreatePipeline = () => {
                 <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-yellow-500">{goldTransformations.length}</p>
                   <p className="text-[10px] text-muted-foreground">Gold</p>
+                </div>
+                <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 text-center">
+                  <p className="text-lg font-bold text-warning">{totalRescuedRows.toLocaleString()}</p>
+                  <p className="text-[10px] text-muted-foreground">Rescued</p>
                 </div>
               </div>
             </CardContent>
@@ -854,9 +899,12 @@ from pyspark.sql.functions import *
 # Pipeline: ${pipelineName || 'unnamed'}
 
 @dlt.table(name="bronze_${outputTableName || 'data'}")
+@dlt.expect_or_drop("valid_amount", "amount IS NOT NULL AND amount >= 0 AND amount <= 1000000")
+@dlt.expect_or_drop("valid_status", "status IN ('completed', 'pending', 'cancelled')")
 def bronze():
     df = spark.read.format("csv")\\
         .option("header", "true")\\
+        .option("rescuedDataColumn", "_rescued_data")\\
         .load("${outputPath}${fileMask || '*.csv'}")
 ${bronzeTransformations.map(t => {
   if (t.type === 'filter') return `    df = df.filter("${t.config.condition || ''}")`;
@@ -904,15 +952,17 @@ ${goldTransformations.map(t => {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Pipeline Execution: {pipelineName}</CardTitle>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Terminal className="h-5 w-5" /> Pipeline Execution: {pipelineName}
+              </CardTitle>
               <p className="text-sm text-muted-foreground">
-                Environment: {env} • {allTransformations.length} transformations (Bronze: {bronzeTransformations.length}, Silver: {silverTransformations.length}, Gold: {goldTransformations.length}) • Output: {outputTableName}
+                Environment: {env} • {allTransformations.length} transformations • Output: {outputTableName}
               </p>
             </CardHeader>
             <CardContent className="space-y-6">
               {execStatus === 'idle' && (
                 <div className="text-center py-8 space-y-4">
-                  <p className="text-muted-foreground">Ready to deploy and execute. This will submit a Databricks DLT job.</p>
+                  <p className="text-muted-foreground">Ready to deploy and execute. This will create a Databricks DLT pipeline and submit a job run.</p>
                   <Button className="gap-2" size="lg" onClick={startExecution}>
                     <Play className="h-5 w-5" /> Start Pipeline
                   </Button>
@@ -921,22 +971,84 @@ ${goldTransformations.map(t => {
 
               {(execStatus === 'running' || execStatus === 'paused') && (
                 <div className="space-y-4">
+                  {/* Cluster & Job Info */}
                   {jobDetails && (
-                    <div className="bg-muted/50 border rounded-md p-3 flex gap-6 text-xs">
-                      <div><span className="text-muted-foreground">Job ID:</span> <span className="font-mono">{jobDetails.jobId}</span></div>
-                      <div><span className="text-muted-foreground">Cluster:</span> <span className="font-mono">{jobDetails.clusterId}</span></div>
-                      <div><span className="text-muted-foreground">Started:</span> <span>{jobDetails.startTime}</span></div>
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                      <div className="bg-muted/50 border rounded-lg p-3">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1"><Activity className="h-3 w-3" /> Job</div>
+                        <p className="font-mono text-xs font-medium">{jobDetails.jobId}</p>
+                        <p className="font-mono text-[10px] text-muted-foreground">Run: {jobDetails.runId}</p>
+                      </div>
+                      <div className="bg-muted/50 border rounded-lg p-3">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1"><Server className="h-3 w-3" /> Cluster</div>
+                        <p className="font-mono text-xs font-medium">{jobDetails.clusterId}</p>
+                        <p className="text-[10px] text-muted-foreground">{jobDetails.clusterName}</p>
+                      </div>
+                      <div className="bg-muted/50 border rounded-lg p-3">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1"><Cpu className="h-3 w-3" /> Compute</div>
+                        <p className="text-xs font-medium">{jobDetails.numWorkers} workers</p>
+                        <p className="text-[10px] text-muted-foreground">{jobDetails.workerType}</p>
+                      </div>
+                      <div className="bg-muted/50 border rounded-lg p-3">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1"><Clock className="h-3 w-3" /> Started</div>
+                        <p className="text-xs font-medium">{new Date(jobDetails.startTime).toLocaleTimeString()}</p>
+                        <p className="text-[10px] text-muted-foreground">{new Date(jobDetails.startTime).toLocaleDateString()}</p>
+                      </div>
                     </div>
                   )}
+
                   <Progress value={(execStep / (execSteps.length - 1)) * 100} className="h-2" />
-                  <div className="space-y-2">
+
+                  {/* Tasks Table */}
+                  {jobDetails && (
+                    <Card>
+                      <CardHeader className="pb-2"><CardTitle className="text-sm">Tasks</CardTitle></CardHeader>
+                      <CardContent className="p-0">
+                        <Table>
+                          <TableHeader>
+                            <TableRow className="bg-muted/50">
+                              <TableHead className="text-xs">Task</TableHead>
+                              <TableHead className="text-xs">Status</TableHead>
+                              <TableHead className="text-xs">Duration</TableHead>
+                              <TableHead className="text-xs text-right">Records In</TableHead>
+                              <TableHead className="text-xs text-right">Records Out</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {jobDetails.tasks.map((task) => (
+                              <TableRow key={task.name}>
+                                <TableCell className="font-mono text-xs">{task.name}</TableCell>
+                                <TableCell>
+                                  {task.status === 'completed' && <Badge className="bg-success text-success-foreground text-[10px]">Completed</Badge>}
+                                  {task.status === 'running' && (
+                                    <Badge className="bg-primary text-primary-foreground text-[10px] gap-1">
+                                      <div className="h-2 w-2 border border-primary-foreground border-t-transparent rounded-full animate-spin" /> Running
+                                    </Badge>
+                                  )}
+                                  {task.status === 'pending' && <Badge variant="outline" className="text-[10px]">Pending</Badge>}
+                                  {task.status === 'failed' && <Badge className="bg-destructive text-destructive-foreground text-[10px]">Failed</Badge>}
+                                </TableCell>
+                                <TableCell className="text-xs text-muted-foreground">{task.duration || '—'}</TableCell>
+                                <TableCell className="text-xs text-right font-mono">{task.recordsIn?.toLocaleString() || '—'}</TableCell>
+                                <TableCell className="text-xs text-right font-mono">{task.recordsOut?.toLocaleString() || '—'}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Pipeline Steps */}
+                  <div className="space-y-1">
                     {execSteps.map((es, i) => (
-                      <div key={es} className="flex items-center gap-3 text-sm">
+                      <div key={es} className="flex items-center gap-3 text-sm py-1">
                         {i < execStep ? <Check className="h-4 w-4 text-success" /> : i === execStep ? <div className="h-4 w-4 border-2 border-primary border-t-transparent rounded-full animate-spin" /> : <div className="h-4 w-4 rounded-full border border-border" />}
                         <span className={i <= execStep ? 'text-foreground' : 'text-muted-foreground'}>{es}</span>
                       </div>
                     ))}
                   </div>
+
                   <div className="flex gap-2">
                     <Button variant="destructive" size="sm" className="gap-2" onClick={() => { setExecStatus('idle'); setJobDetails(null); toast.info('Pipeline stopped'); }}>
                       <Square className="h-3.5 w-3.5" /> Stop
@@ -949,13 +1061,70 @@ ${goldTransformations.map(t => {
               )}
 
               {execStatus === 'success' && (
-                <div className="text-center py-8 space-y-6">
-                  <CheckCircle2 className="h-20 w-20 text-success mx-auto" />
-                  <div>
-                    <h3 className="text-xl font-bold text-success">Pipeline Completed Successfully!</h3>
+                <div className="space-y-6">
+                  <div className="text-center py-6">
+                    <CheckCircle2 className="h-20 w-20 text-success mx-auto mb-4" />
+                    <h3 className="text-xl font-bold text-success">Pipeline Completed Successfully</h3>
                     <p className="text-muted-foreground mt-1">{pipelineName} — Table "{outputTableName}" written to {outputPath}</p>
-                    {jobDetails && <p className="text-xs text-muted-foreground mt-1">Job {jobDetails.jobId} • Started {jobDetails.startTime}</p>}
                   </div>
+
+                  {/* Final metrics */}
+                  {jobDetails && (
+                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                      <div className="bg-muted/50 border rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Job ID</p>
+                        <p className="font-mono text-xs font-medium">{jobDetails.jobId}</p>
+                      </div>
+                      <div className="bg-muted/50 border rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Cluster</p>
+                        <p className="font-mono text-xs font-medium">{jobDetails.clusterId}</p>
+                      </div>
+                      <div className="bg-muted/50 border rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Duration</p>
+                        <p className="text-xs font-medium">{jobDetails.endTime ? `${Math.round((new Date(jobDetails.endTime).getTime() - new Date(jobDetails.startTime).getTime()) / 1000)}s` : '—'}</p>
+                      </div>
+                      <div className="bg-success/10 border border-success/20 rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Rows Written</p>
+                        <p className="text-sm font-bold text-success">{totalValidRows.toLocaleString()}</p>
+                      </div>
+                      <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Rescued</p>
+                        <p className="text-sm font-bold text-warning">{totalRescuedRows.toLocaleString()}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Tasks final status */}
+                  {jobDetails && (
+                    <Card>
+                      <CardHeader className="pb-2"><CardTitle className="text-sm">Completed Tasks</CardTitle></CardHeader>
+                      <CardContent className="p-0">
+                        <Table>
+                          <TableHeader>
+                            <TableRow className="bg-muted/50">
+                              <TableHead className="text-xs">Task</TableHead>
+                              <TableHead className="text-xs">Status</TableHead>
+                              <TableHead className="text-xs">Duration</TableHead>
+                              <TableHead className="text-xs text-right">Records In</TableHead>
+                              <TableHead className="text-xs text-right">Records Out</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {jobDetails.tasks.map((task) => (
+                              <TableRow key={task.name}>
+                                <TableCell className="font-mono text-xs">{task.name}</TableCell>
+                                <TableCell><Badge className="bg-success text-success-foreground text-[10px]">Completed</Badge></TableCell>
+                                <TableCell className="text-xs">{task.duration || '—'}</TableCell>
+                                <TableCell className="text-xs text-right font-mono">{task.recordsIn?.toLocaleString() || '—'}</TableCell>
+                                <TableCell className="text-xs text-right font-mono">{task.recordsOut?.toLocaleString() || '—'}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </CardContent>
+                    </Card>
+                  )}
+
                   <div className="flex gap-3 justify-center">
                     <Button className="gap-2" onClick={() => toast.success('Downloading output...')}>
                       <Download className="h-4 w-4" /> Download Output
@@ -964,24 +1133,44 @@ ${goldTransformations.map(t => {
                       <Eye className="h-4 w-4" /> Preview Results
                     </Button>
                   </div>
-                  <Button variant="outline" onClick={() => navigate('/pipelines')}>Go to Pipelines</Button>
+                  <div className="text-center">
+                    <Button variant="outline" onClick={() => navigate('/pipelines')}>Go to Pipelines</Button>
+                  </div>
                 </div>
               )}
 
               {execStatus === 'failed' && (
-                <div className="text-center py-8 space-y-6">
-                  <XCircle className="h-20 w-20 text-destructive mx-auto" />
-                  <div>
+                <div className="space-y-6">
+                  <div className="text-center py-6">
+                    <XCircle className="h-20 w-20 text-destructive mx-auto mb-4" />
                     <h3 className="text-xl font-bold text-destructive">Pipeline Failed</h3>
                     <p className="text-muted-foreground mt-1">{pipelineName} encountered an error.</p>
-                    {jobDetails && <p className="text-xs text-muted-foreground mt-1">Job {jobDetails.jobId} • Cluster {jobDetails.clusterId}</p>}
                   </div>
-                  <Card className="border-destructive/30 bg-destructive/5 text-left">
+
+                  {jobDetails && (
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="bg-muted/50 border rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Job ID</p>
+                        <p className="font-mono text-xs">{jobDetails.jobId}</p>
+                      </div>
+                      <div className="bg-muted/50 border rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Cluster</p>
+                        <p className="font-mono text-xs">{jobDetails.clusterId}</p>
+                      </div>
+                      <div className="bg-muted/50 border rounded-lg p-3 text-center">
+                        <p className="text-xs text-muted-foreground">Failed At</p>
+                        <p className="text-xs">{new Date().toLocaleTimeString()}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  <Card className="border-destructive/30 bg-destructive/5">
                     <CardContent className="p-4">
                       <p className="text-sm font-medium text-destructive mb-2">Error Details:</p>
                       <pre className="text-xs font-mono whitespace-pre-wrap text-destructive">{execError}</pre>
                     </CardContent>
                   </Card>
+
                   <div className="flex gap-3 justify-center">
                     <Button variant="destructive" className="gap-2" onClick={() => { setExecStatus('idle'); setJobDetails(null); }}>
                       <Square className="h-4 w-4" /> Stop
@@ -998,9 +1187,9 @@ ${goldTransformations.map(t => {
 
               {execLogs.length > 0 && (
                 <Card>
-                  <CardHeader className="pb-2"><CardTitle className="text-sm">Execution Logs</CardTitle></CardHeader>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><Terminal className="h-4 w-4" /> Execution Logs</CardTitle></CardHeader>
                   <CardContent>
-                    <pre className="bg-muted rounded-md p-3 text-[10px] font-mono overflow-auto max-h-40">
+                    <pre className="bg-background border rounded-md p-3 text-[10px] font-mono overflow-auto max-h-48 text-foreground">
                       {execLogs.join('\n')}
                     </pre>
                   </CardContent>
