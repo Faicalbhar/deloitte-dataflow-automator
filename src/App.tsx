@@ -6,7 +6,6 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { AppLayout } from "@/components/layout/AppLayout";
 import Login from "@/pages/Login";
-import Dashboard from "@/pages/Dashboard";
 import Pipelines from "@/pages/Pipelines";
 import PipelineDetail from "@/pages/PipelineDetail";
 import CreatePipeline from "@/pages/CreatePipeline";
@@ -14,7 +13,6 @@ import EditPipeline from "@/pages/EditPipeline";
 import DataCatalog from "@/pages/DataCatalog";
 import Quarantine from "@/pages/Quarantine";
 import SettingsPage from "@/pages/SettingsPage";
-
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -39,15 +37,13 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<Dashboard />} />
+        <Route index element={<CreatePipeline />} />
         <Route path="pipelines" element={<Pipelines />} />
         <Route path="pipelines/:id" element={<PipelineDetail />} />
         <Route path="pipelines/:id/edit" element={<EditPipeline />} />
-        <Route path="create-pipeline" element={<CreatePipeline />} />
         <Route path="data-catalog" element={<DataCatalog />} />
         <Route path="quarantine" element={<Quarantine />} />
         <Route path="settings" element={<SettingsPage />} />
-        
       </Route>
       <Route path="*" element={<NotFound />} />
     </Routes>
