@@ -4,9 +4,8 @@ import { AppSidebar } from './AppSidebar';
 import { AppHeader } from './AppHeader';
 
 const pageTitles: Record<string, string> = {
-  '/': 'Dashboard',
+  '/': 'Pipeline Builder',
   '/pipelines': 'Pipelines',
-  '/create-pipeline': 'Create Pipeline',
   '/data-catalog': 'Data Catalog',
   '/quarantine': 'Quarantine',
   '/settings': 'Settings',

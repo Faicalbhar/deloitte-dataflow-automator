@@ -1,5 +1,5 @@
 import {
-  LayoutDashboard, GitBranch, PlusCircle, Database, ShieldAlert,
+  GitBranch, PlusCircle, Database, ShieldAlert,
   Settings,
 } from 'lucide-react';
 import { NavLink } from '@/components/NavLink';
@@ -10,9 +10,8 @@ import {
 } from '@/components/ui/sidebar';
 
 const navItems = [
-  { title: 'Dashboard', url: '/', icon: LayoutDashboard },
+  { title: 'Pipeline Builder', url: '/', icon: PlusCircle },
   { title: 'Pipelines', url: '/pipelines', icon: GitBranch },
-  { title: 'Create Pipeline', url: '/create-pipeline', icon: PlusCircle },
   { title: 'Data Catalog', url: '/data-catalog', icon: Database },
   { title: 'Quarantine', url: '/quarantine', icon: ShieldAlert },
   { title: 'Settings', url: '/settings', icon: Settings },
