@@ -48,7 +48,7 @@ const Pipelines = () => {
             <div className="py-16 text-center">
               <p className="text-lg font-medium mb-2">No pipelines found</p>
               <p className="text-muted-foreground mb-4">Create your first pipeline to get started.</p>
-              <Button onClick={() => navigate('/create-pipeline')}>Create Pipeline</Button>
+              <Button onClick={() => navigate('/')}>Create Pipeline</Button>
             </div>
           ) : (
             <Table>
