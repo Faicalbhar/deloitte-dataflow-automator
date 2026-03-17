@@ -171,38 +171,40 @@ const CreatePipeline = () => {
 
   // ─── Computed columns ──────────────────────────────────────────────────────
 
+  type SourceColumn = SchemaColumn & { sourceId: string; sourceName: string; transformed?: boolean; transformedFrom?: string };
+
   // All source columns (from all sources)
   const allSourceColumns = useMemo(() => {
-    const cols: (SchemaColumn & { sourceId: string; sourceName: string })[] = [];
+    const cols: SourceColumn[] = [];
     sources.forEach(s => {
       s.columns.forEach(c => cols.push({ ...c, sourceId: s.id, sourceName: s.name }));
     });
     return cols;
   }, [sources]);
 
-  // Compute columns after a layer's transformations
-  const computeLayerOutputColumns = useCallback((inputCols: SchemaColumn[], transformations: Transformation[]): SchemaColumn[] => {
-    let cols = [...inputCols];
+  // Compute columns after a layer's transformations — preserves sourceId/sourceName
+  const computeLayerOutputColumns = useCallback((inputCols: SourceColumn[], transformations: Transformation[]): SourceColumn[] => {
+    let cols = [...inputCols.map(c => ({ ...c }))];
     transformations.forEach(t => {
       if (t.type === 'rename' && t.config.newName) {
-        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, name: t.config.newName as string } : c);
+        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, name: t.config.newName as string, transformed: true, transformedFrom: t.sourceColumns[0] } : c);
       }
       if (t.type === 'cast' && t.config.targetType) {
-        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, type: t.config.targetType as ColumnType } : c);
+        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, type: t.config.targetType as ColumnType, transformed: true } : c);
       }
       if (t.type === 'drop_column') {
         cols = cols.filter(c => !t.sourceColumns.includes(c.name));
       }
       if (t.type === 'add_column' && t.targetColumn) {
         if (!cols.find(c => c.name === t.targetColumn)) {
-          cols.push({ id: `derived-${t.id}`, name: t.targetColumn!, type: 'STRING', nullable: true, unique: false, description: t.description, sensitive: false, sampleValues: [] });
+          cols.push({ id: `derived-${t.id}`, name: t.targetColumn!, type: 'STRING', nullable: true, unique: false, description: t.description, sensitive: false, sampleValues: [], sourceId: 'derived', sourceName: 'Derived', transformed: true });
         }
       }
       if (t.type === 'aggregate' && t.targetColumn) {
         const groupBy = (t.config.groupBy as string[]) || [];
         const kept = cols.filter(c => groupBy.includes(c.name));
         if (t.targetColumn && !kept.find(c => c.name === t.targetColumn)) {
-          kept.push({ id: `agg-${t.id}`, name: t.targetColumn!, type: 'DECIMAL', nullable: false, unique: false, description: t.description, sensitive: false, sampleValues: [] });
+          kept.push({ id: `agg-${t.id}`, name: t.targetColumn!, type: 'DECIMAL', nullable: false, unique: false, description: t.description, sensitive: false, sampleValues: [], sourceId: 'derived', sourceName: 'Aggregated', transformed: true });
         }
         cols = kept;
       }
@@ -215,12 +217,24 @@ const CreatePipeline = () => {
   const silverOutputColumns = useMemo(() => computeLayerOutputColumns(bronzeOutputColumns, silverTransformations), [bronzeOutputColumns, silverTransformations, computeLayerOutputColumns]);
   const goldOutputColumns = useMemo(() => computeLayerOutputColumns(silverOutputColumns, goldTransformations), [silverOutputColumns, goldTransformations, computeLayerOutputColumns]);
 
-  const getLayerInputColumns = useCallback((layer: DagLayer): SchemaColumn[] => {
+  const getLayerInputColumns = useCallback((layer: DagLayer): SourceColumn[] => {
     if (layer === 'bronze') return baseSourceColumns;
     if (layer === 'silver') return bronzeOutputColumns;
     if (layer === 'gold') return silverOutputColumns;
     return [];
   }, [baseSourceColumns, bronzeOutputColumns, silverOutputColumns]);
+
+  // Group columns by source for display
+  const getColumnsGroupedBySource = useCallback((layer: DagLayer): { sourceId: string; sourceName: string; columns: SourceColumn[] }[] => {
+    const cols = getLayerInputColumns(layer);
+    const groups: Record<string, { sourceId: string; sourceName: string; columns: SourceColumn[] }> = {};
+    cols.forEach(c => {
+      const key = c.sourceId;
+      if (!groups[key]) groups[key] = { sourceId: c.sourceId, sourceName: c.sourceName, columns: [] };
+      groups[key].columns.push(c);
+    });
+    return Object.values(groups);
+  }, [getLayerInputColumns]);
 
   // ─── Layer transformations ─────────────────────────────────────────────────
 
