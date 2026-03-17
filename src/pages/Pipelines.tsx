@@ -36,7 +36,7 @@ const Pipelines = () => {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input placeholder="Search pipelines..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
         </div>
-        <Button className="gap-2" onClick={() => navigate('/create-pipeline')}>
+        <Button className="gap-2" onClick={() => navigate('/')}>
           <Plus className="h-4 w-4" /> Create Pipeline
         </Button>
       </div>
