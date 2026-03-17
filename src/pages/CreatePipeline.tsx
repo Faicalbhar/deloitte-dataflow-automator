@@ -780,42 +780,67 @@ const CreatePipeline = () => {
           </div>
 
           <div className="flex gap-4">
-            {/* Left: Input Columns */}
+            {/* Left: Input Columns grouped by source */}
             <div className="w-1/3 space-y-4">
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">
-                    Input Columns — {activeLayer === 'bronze' ? 'From Sources' : `From ${activeLayer === 'silver' ? 'Bronze' : 'Silver'}`}
-                  </CardTitle>
-                  <p className="text-[10px] text-muted-foreground">{currentInputColumns.length} columns</p>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <ScrollArea className="max-h-[400px]">
-                    <Table>
-                      <TableHeader>
-                        <TableRow className="bg-muted/50">
-                          <TableHead className="text-[10px]">Column</TableHead>
-                          <TableHead className="text-[10px]">Type</TableHead>
-                          {activeLayer === 'bronze' && <TableHead className="text-[10px]">Source</TableHead>}
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {currentInputColumns.map((col, i) => (
-                          <TableRow key={`${col.id}-${i}`} className="text-[11px]">
-                            <TableCell className="py-1 font-mono">{col.name}</TableCell>
-                            <TableCell className="py-1"><Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge></TableCell>
-                            {activeLayer === 'bronze' && (
-                              <TableCell className="py-1 text-[10px] text-muted-foreground">
-                                {(col as any).sourceName || '—'}
-                              </TableCell>
-                            )}
+              {getColumnsGroupedBySource(activeLayer).map(group => (
+                <Card key={group.sourceId}>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <Database className="h-3.5 w-3.5 text-info" />
+                      {group.sourceName}
+                      <Badge variant="outline" className="text-[9px] ml-auto">{group.columns.length} cols</Badge>
+                    </CardTitle>
+                    {activeLayer !== 'bronze' && (
+                      <p className="text-[10px] text-muted-foreground">
+                        After {activeLayer === 'silver' ? 'Bronze' : 'Silver'} transformations
+                      </p>
+                    )}
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    <ScrollArea className="max-h-[250px]">
+                      <Table>
+                        <TableHeader>
+                          <TableRow className="bg-muted/50">
+                            <TableHead className="text-[10px]">Column</TableHead>
+                            <TableHead className="text-[10px]">Type</TableHead>
+                            {activeLayer !== 'bronze' && <TableHead className="text-[10px]">Changed</TableHead>}
                           </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
+                        </TableHeader>
+                        <TableBody>
+                          {group.columns.map((col, i) => (
+                            <TableRow key={`${col.id}-${i}`} className={`text-[11px] ${col.transformed ? 'bg-primary/5' : ''}`}>
+                              <TableCell className="py-1 font-mono">
+                                {col.name}
+                                {col.transformedFrom && (
+                                  <span className="text-[9px] text-muted-foreground block">← {col.transformedFrom}</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="py-1">
+                                <Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge>
+                              </TableCell>
+                              {activeLayer !== 'bronze' && (
+                                <TableCell className="py-1">
+                                  {col.transformed && (
+                                    <Badge className="bg-primary/10 text-primary text-[8px]">Modified</Badge>
+                                  )}
+                                </TableCell>
+                              )}
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              ))}
+
+              {getColumnsGroupedBySource(activeLayer).length === 0 && (
+                <Card>
+                  <CardContent className="py-8 text-center text-muted-foreground text-sm">
+                    <p>No source columns. Configure sources first.</p>
+                  </CardContent>
+                </Card>
+              )}
 
               {/* Quality Checks (Bronze only) */}
               {activeLayer === 'bronze' && (
