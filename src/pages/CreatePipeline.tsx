@@ -842,19 +842,19 @@ const CreatePipeline = () => {
                 </Card>
               )}
 
-              {/* Quality Checks (Bronze only) */}
-              {activeLayer === 'bronze' && (
-                <Card>
+              {/* Quality Checks (Bronze only) — per source */}
+              {activeLayer === 'bronze' && getColumnsGroupedBySource('bronze').map(group => (
+                <Card key={`qc-${group.sourceId}`}>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm flex items-center gap-2">
-                      <ShieldCheck className="h-4 w-4" /> Quality Checks
+                      <ShieldCheck className="h-4 w-4" /> Quality — {group.sourceName}
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2">
-                    {qualityChecks.length === 0 && (
-                      <p className="text-xs text-muted-foreground text-center py-2">No quality checks. Click a column name above or add below.</p>
+                    {qualityChecks.filter(qc => qc.sourceId === group.sourceId).length === 0 && (
+                      <p className="text-xs text-muted-foreground text-center py-2">No quality checks for this source.</p>
                     )}
-                    {qualityChecks.map(qc => (
+                    {qualityChecks.filter(qc => qc.sourceId === group.sourceId).map(qc => (
                       <div key={qc.id} className="border rounded-lg p-2 space-y-1">
                         <div className="flex items-center justify-between">
                           <Badge variant="outline" className="text-[9px] font-mono">{qc.columnName}</Badge>
@@ -896,18 +896,18 @@ const CreatePipeline = () => {
                         )}
                       </div>
                     ))}
-                    <Select onValueChange={(colName) => addQualityCheck(sources[0]?.id || '', colName)}>
+                    <Select onValueChange={(colName) => addQualityCheck(group.sourceId, colName)}>
                       <SelectTrigger className="h-7 text-xs">
                         <Plus className="h-3 w-3 mr-1" />
-                        <SelectValue placeholder="Add quality check on..." />
+                        <SelectValue placeholder="Add quality check..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {currentInputColumns.map(c => <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>)}
+                        {group.columns.map(c => <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </CardContent>
                 </Card>
-              )}
+              ))}
             </div>
 
             {/* Right: Transformations */}
