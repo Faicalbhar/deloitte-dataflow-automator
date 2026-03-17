@@ -171,38 +171,40 @@ const CreatePipeline = () => {
 
   // ─── Computed columns ──────────────────────────────────────────────────────
 
+  type SourceColumn = SchemaColumn & { sourceId: string; sourceName: string; transformed?: boolean; transformedFrom?: string };
+
   // All source columns (from all sources)
   const allSourceColumns = useMemo(() => {
-    const cols: (SchemaColumn & { sourceId: string; sourceName: string })[] = [];
+    const cols: SourceColumn[] = [];
     sources.forEach(s => {
       s.columns.forEach(c => cols.push({ ...c, sourceId: s.id, sourceName: s.name }));
     });
     return cols;
   }, [sources]);
 
-  // Compute columns after a layer's transformations
-  const computeLayerOutputColumns = useCallback((inputCols: SchemaColumn[], transformations: Transformation[]): SchemaColumn[] => {
-    let cols = [...inputCols];
+  // Compute columns after a layer's transformations — preserves sourceId/sourceName
+  const computeLayerOutputColumns = useCallback((inputCols: SourceColumn[], transformations: Transformation[]): SourceColumn[] => {
+    let cols = [...inputCols.map(c => ({ ...c }))];
     transformations.forEach(t => {
       if (t.type === 'rename' && t.config.newName) {
-        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, name: t.config.newName as string } : c);
+        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, name: t.config.newName as string, transformed: true, transformedFrom: t.sourceColumns[0] } : c);
       }
       if (t.type === 'cast' && t.config.targetType) {
-        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, type: t.config.targetType as ColumnType } : c);
+        cols = cols.map(c => c.name === t.sourceColumns[0] ? { ...c, type: t.config.targetType as ColumnType, transformed: true } : c);
       }
       if (t.type === 'drop_column') {
         cols = cols.filter(c => !t.sourceColumns.includes(c.name));
       }
       if (t.type === 'add_column' && t.targetColumn) {
         if (!cols.find(c => c.name === t.targetColumn)) {
-          cols.push({ id: `derived-${t.id}`, name: t.targetColumn!, type: 'STRING', nullable: true, unique: false, description: t.description, sensitive: false, sampleValues: [] });
+          cols.push({ id: `derived-${t.id}`, name: t.targetColumn!, type: 'STRING', nullable: true, unique: false, description: t.description, sensitive: false, sampleValues: [], sourceId: 'derived', sourceName: 'Derived', transformed: true });
         }
       }
       if (t.type === 'aggregate' && t.targetColumn) {
         const groupBy = (t.config.groupBy as string[]) || [];
         const kept = cols.filter(c => groupBy.includes(c.name));
         if (t.targetColumn && !kept.find(c => c.name === t.targetColumn)) {
-          kept.push({ id: `agg-${t.id}`, name: t.targetColumn!, type: 'DECIMAL', nullable: false, unique: false, description: t.description, sensitive: false, sampleValues: [] });
+          kept.push({ id: `agg-${t.id}`, name: t.targetColumn!, type: 'DECIMAL', nullable: false, unique: false, description: t.description, sensitive: false, sampleValues: [], sourceId: 'derived', sourceName: 'Aggregated', transformed: true });
         }
         cols = kept;
       }
@@ -215,12 +217,24 @@ const CreatePipeline = () => {
   const silverOutputColumns = useMemo(() => computeLayerOutputColumns(bronzeOutputColumns, silverTransformations), [bronzeOutputColumns, silverTransformations, computeLayerOutputColumns]);
   const goldOutputColumns = useMemo(() => computeLayerOutputColumns(silverOutputColumns, goldTransformations), [silverOutputColumns, goldTransformations, computeLayerOutputColumns]);
 
-  const getLayerInputColumns = useCallback((layer: DagLayer): SchemaColumn[] => {
+  const getLayerInputColumns = useCallback((layer: DagLayer): SourceColumn[] => {
     if (layer === 'bronze') return baseSourceColumns;
     if (layer === 'silver') return bronzeOutputColumns;
     if (layer === 'gold') return silverOutputColumns;
     return [];
   }, [baseSourceColumns, bronzeOutputColumns, silverOutputColumns]);
+
+  // Group columns by source for display
+  const getColumnsGroupedBySource = useCallback((layer: DagLayer): { sourceId: string; sourceName: string; columns: SourceColumn[] }[] => {
+    const cols = getLayerInputColumns(layer);
+    const groups: Record<string, { sourceId: string; sourceName: string; columns: SourceColumn[] }> = {};
+    cols.forEach(c => {
+      const key = c.sourceId;
+      if (!groups[key]) groups[key] = { sourceId: c.sourceId, sourceName: c.sourceName, columns: [] };
+      groups[key].columns.push(c);
+    });
+    return Object.values(groups);
+  }, [getLayerInputColumns]);
 
   // ─── Layer transformations ─────────────────────────────────────────────────
 
@@ -766,56 +780,81 @@ const CreatePipeline = () => {
           </div>
 
           <div className="flex gap-4">
-            {/* Left: Input Columns */}
+            {/* Left: Input Columns grouped by source */}
             <div className="w-1/3 space-y-4">
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">
-                    Input Columns — {activeLayer === 'bronze' ? 'From Sources' : `From ${activeLayer === 'silver' ? 'Bronze' : 'Silver'}`}
-                  </CardTitle>
-                  <p className="text-[10px] text-muted-foreground">{currentInputColumns.length} columns</p>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <ScrollArea className="max-h-[400px]">
-                    <Table>
-                      <TableHeader>
-                        <TableRow className="bg-muted/50">
-                          <TableHead className="text-[10px]">Column</TableHead>
-                          <TableHead className="text-[10px]">Type</TableHead>
-                          {activeLayer === 'bronze' && <TableHead className="text-[10px]">Source</TableHead>}
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {currentInputColumns.map((col, i) => (
-                          <TableRow key={`${col.id}-${i}`} className="text-[11px]">
-                            <TableCell className="py-1 font-mono">{col.name}</TableCell>
-                            <TableCell className="py-1"><Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge></TableCell>
-                            {activeLayer === 'bronze' && (
-                              <TableCell className="py-1 text-[10px] text-muted-foreground">
-                                {(col as any).sourceName || '—'}
-                              </TableCell>
-                            )}
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-
-              {/* Quality Checks (Bronze only) */}
-              {activeLayer === 'bronze' && (
-                <Card>
+              {getColumnsGroupedBySource(activeLayer).map(group => (
+                <Card key={group.sourceId}>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm flex items-center gap-2">
-                      <ShieldCheck className="h-4 w-4" /> Quality Checks
+                      <Database className="h-3.5 w-3.5 text-info" />
+                      {group.sourceName}
+                      <Badge variant="outline" className="text-[9px] ml-auto">{group.columns.length} cols</Badge>
+                    </CardTitle>
+                    {activeLayer !== 'bronze' && (
+                      <p className="text-[10px] text-muted-foreground">
+                        After {activeLayer === 'silver' ? 'Bronze' : 'Silver'} transformations
+                      </p>
+                    )}
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    <ScrollArea className="max-h-[250px]">
+                      <Table>
+                        <TableHeader>
+                          <TableRow className="bg-muted/50">
+                            <TableHead className="text-[10px]">Column</TableHead>
+                            <TableHead className="text-[10px]">Type</TableHead>
+                            {activeLayer !== 'bronze' && <TableHead className="text-[10px]">Changed</TableHead>}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {group.columns.map((col, i) => (
+                            <TableRow key={`${col.id}-${i}`} className={`text-[11px] ${col.transformed ? 'bg-primary/5' : ''}`}>
+                              <TableCell className="py-1 font-mono">
+                                {col.name}
+                                {col.transformedFrom && (
+                                  <span className="text-[9px] text-muted-foreground block">← {col.transformedFrom}</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="py-1">
+                                <Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge>
+                              </TableCell>
+                              {activeLayer !== 'bronze' && (
+                                <TableCell className="py-1">
+                                  {col.transformed && (
+                                    <Badge className="bg-primary/10 text-primary text-[8px]">Modified</Badge>
+                                  )}
+                                </TableCell>
+                              )}
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              ))}
+
+              {getColumnsGroupedBySource(activeLayer).length === 0 && (
+                <Card>
+                  <CardContent className="py-8 text-center text-muted-foreground text-sm">
+                    <p>No source columns. Configure sources first.</p>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Quality Checks (Bronze only) — per source */}
+              {activeLayer === 'bronze' && getColumnsGroupedBySource('bronze').map(group => (
+                <Card key={`qc-${group.sourceId}`}>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <ShieldCheck className="h-4 w-4" /> Quality — {group.sourceName}
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2">
-                    {qualityChecks.length === 0 && (
-                      <p className="text-xs text-muted-foreground text-center py-2">No quality checks. Click a column name above or add below.</p>
+                    {qualityChecks.filter(qc => qc.sourceId === group.sourceId).length === 0 && (
+                      <p className="text-xs text-muted-foreground text-center py-2">No quality checks for this source.</p>
                     )}
-                    {qualityChecks.map(qc => (
+                    {qualityChecks.filter(qc => qc.sourceId === group.sourceId).map(qc => (
                       <div key={qc.id} className="border rounded-lg p-2 space-y-1">
                         <div className="flex items-center justify-between">
                           <Badge variant="outline" className="text-[9px] font-mono">{qc.columnName}</Badge>
@@ -857,18 +896,18 @@ const CreatePipeline = () => {
                         )}
                       </div>
                     ))}
-                    <Select onValueChange={(colName) => addQualityCheck(sources[0]?.id || '', colName)}>
+                    <Select onValueChange={(colName) => addQualityCheck(group.sourceId, colName)}>
                       <SelectTrigger className="h-7 text-xs">
                         <Plus className="h-3 w-3 mr-1" />
-                        <SelectValue placeholder="Add quality check on..." />
+                        <SelectValue placeholder="Add quality check..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {currentInputColumns.map(c => <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>)}
+                        {group.columns.map(c => <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </CardContent>
                 </Card>
-              )}
+              ))}
             </div>
 
             {/* Right: Transformations */}
