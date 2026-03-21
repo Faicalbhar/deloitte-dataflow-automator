@@ -134,10 +134,11 @@ const CreatePipeline = () => {
 
   // DAG
   const [activeLayer, setActiveLayer] = useState<DagLayer | null>(null);
-  const [bronzeTransformations, setBronzeTransformations] = useState<Transformation[]>([]);
-  const [silverTransformations, setSilverTransformations] = useState<Transformation[]>([]);
-  const [goldTransformations, setGoldTransformations] = useState<Transformation[]>([]);
+  // Per-source transformations: key = "layer:sourceId" or "layer:cross" for cross-source
+  const [layerTransformations, setLayerTransformationsState] = useState<Record<string, Transformation[]>>({});
   const [qualityChecks, setQualityChecks] = useState<QualityCheck[]>([]);
+  const [activeTransformationTab, setActiveTransformationTab] = useState<string>('');
+
 
   // AI
   const [aiOpen, setAiOpen] = useState(false);
