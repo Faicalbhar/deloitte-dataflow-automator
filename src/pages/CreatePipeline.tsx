@@ -4,7 +4,7 @@ import {
   Plus, Trash2, GripVertical, Send, Code, CheckCircle2, XCircle, Download, Eye,
   Square, Pause, Play, RotateCcw, Sparkles, FileSearch, AlertTriangle, Database,
   ArrowRightCircle, Layers, ChevronRight, Clock, Cpu, Server, Activity, Terminal,
-  ShieldCheck, FolderSearch
+  ShieldCheck, FolderSearch, Link2
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -69,10 +69,9 @@ const typeColors: Record<ColumnType, string> = {
   TIMESTAMP: 'bg-accent text-accent-foreground',
 };
 
-// Mock DBFS files generator per source
 const generateMockDbfsFiles = (fileMask: string, sourceIndex: number): DbfsFile[] => {
   const baseName = fileMask.replace('*', '').replace('.csv', '').replace('.parquet', '');
-  const files: DbfsFile[] = [
+  return [
     {
       name: `${baseName}2025_01.csv`, path: `/mnt/data/raw/${baseName}2025_01.csv`,
       size: `${180 + sourceIndex * 40} MB`, lastModified: '2025-02-20',
@@ -97,7 +96,6 @@ const generateMockDbfsFiles = (fileMask: string, sourceIndex: number): DbfsFile[
       ]
     },
   ];
-  return files;
 };
 
 const secondSourceColumns: SchemaColumn[] = [
@@ -134,15 +132,15 @@ const CreatePipeline = () => {
 
   // DAG
   const [activeLayer, setActiveLayer] = useState<DagLayer | null>(null);
-  const [bronzeTransformations, setBronzeTransformations] = useState<Transformation[]>([]);
-  const [silverTransformations, setSilverTransformations] = useState<Transformation[]>([]);
-  const [goldTransformations, setGoldTransformations] = useState<Transformation[]>([]);
+  // Per-source transformations: key = "layer:sourceId" or "layer:cross" for cross-source
+  const [layerTransformations, setLayerTransformationsMap] = useState<Record<string, Transformation[]>>({});
   const [qualityChecks, setQualityChecks] = useState<QualityCheck[]>([]);
+  const [activeTransformationTab, setActiveTransformationTab] = useState<string>('');
 
   // AI
   const [aiOpen, setAiOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', content: "👋 I'm your AI Transformation Agent. Describe transformations in natural language.\n\nExamples:\n• \"Filter cancelled rows, rename transaction_date to txn_date\"\n• \"Join source 1 and source 2 on client_id\"\n• \"Aggregate total amount by client_id, sort by date DESC\"" }
+    { role: 'assistant', content: "👋 I'm your AI Transformation Agent. Describe transformations in natural language.\n\nExamples:\n• \"Filter cancelled rows in Source 1\"\n• \"Join Source 1 and Source 2 on client_id\"\n• \"Rename transaction_date to txn_date in Source 1\"\n• \"Aggregate total amount by client_id across all sources\"" }
   ]);
   const [chatInput, setChatInput] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -169,11 +167,45 @@ const CreatePipeline = () => {
     tasks: { name: string; status: 'pending' | 'running' | 'completed' | 'failed'; duration?: string; recordsIn?: number; recordsOut?: number }[];
   } | null>(null);
 
+  // ─── Per-source transformation helpers ─────────────────────────────────────
+
+  const getTKey = (layer: DagLayer, sourceId: string) => `${layer}:${sourceId}`;
+  const getCrossKey = (layer: DagLayer) => `${layer}:cross`;
+
+  const getSourceTransformations = useCallback((layer: DagLayer, sourceId: string): Transformation[] => {
+    return layerTransformations[getTKey(layer, sourceId)] || [];
+  }, [layerTransformations]);
+
+  const getCrossTransformations = useCallback((layer: DagLayer): Transformation[] => {
+    return layerTransformations[getCrossKey(layer)] || [];
+  }, [layerTransformations]);
+
+  const setSourceTransformations = useCallback((layer: DagLayer, sourceId: string, t: Transformation[]) => {
+    setLayerTransformationsMap(prev => ({ ...prev, [getTKey(layer, sourceId)]: t }));
+  }, []);
+
+  const setCrossTransformations = useCallback((layer: DagLayer, t: Transformation[]) => {
+    setLayerTransformationsMap(prev => ({ ...prev, [getCrossKey(layer)]: t }));
+  }, []);
+
+  // Get ALL transformations for a layer (all sources + cross)
+  const getAllLayerTransformations = useCallback((layer: DagLayer): Transformation[] => {
+    const result: Transformation[] = [];
+    sources.forEach(s => {
+      result.push(...(layerTransformations[getTKey(layer, s.id)] || []));
+    });
+    result.push(...(layerTransformations[getCrossKey(layer)] || []));
+    return result;
+  }, [layerTransformations, sources]);
+
+  const getLayerTransformationCount = useCallback((layer: DagLayer): number => {
+    return getAllLayerTransformations(layer).length;
+  }, [getAllLayerTransformations]);
+
   // ─── Computed columns ──────────────────────────────────────────────────────
 
   type SourceColumn = SchemaColumn & { sourceId: string; sourceName: string; transformed?: boolean; transformedFrom?: string };
 
-  // All source columns (from all sources)
   const allSourceColumns = useMemo(() => {
     const cols: SourceColumn[] = [];
     sources.forEach(s => {
@@ -182,8 +214,8 @@ const CreatePipeline = () => {
     return cols;
   }, [sources]);
 
-  // Compute columns after a layer's transformations — preserves sourceId/sourceName
-  const computeLayerOutputColumns = useCallback((inputCols: SourceColumn[], transformations: Transformation[]): SourceColumn[] => {
+  // Apply per-source transformations then cross-source transformations
+  const applyTransformationsToColumns = useCallback((inputCols: SourceColumn[], transformations: Transformation[]): SourceColumn[] => {
     let cols = [...inputCols.map(c => ({ ...c }))];
     transformations.forEach(t => {
       if (t.type === 'rename' && t.config.newName) {
@@ -208,14 +240,37 @@ const CreatePipeline = () => {
         }
         cols = kept;
       }
+      if (t.type === 'join' && t.config.joinColumn) {
+        // Join merges columns from multiple sources — mark as transformed
+        cols = cols.map(c => ({ ...c, transformed: true }));
+      }
     });
     return cols;
   }, []);
 
+  const computeLayerOutput = useCallback((layer: DagLayer, inputCols: SourceColumn[]): SourceColumn[] => {
+    // First apply per-source transformations
+    let cols = [...inputCols];
+    sources.forEach(s => {
+      const srcT = getSourceTransformations(layer, s.id);
+      if (srcT.length > 0) {
+        const sourceCols = cols.filter(c => c.sourceId === s.id);
+        const otherCols = cols.filter(c => c.sourceId !== s.id);
+        cols = [...otherCols, ...applyTransformationsToColumns(sourceCols, srcT)];
+      }
+    });
+    // Then apply cross-source transformations
+    const crossT = getCrossTransformations(layer);
+    if (crossT.length > 0) {
+      cols = applyTransformationsToColumns(cols, crossT);
+    }
+    return cols;
+  }, [sources, getSourceTransformations, getCrossTransformations, applyTransformationsToColumns]);
+
   const baseSourceColumns = useMemo(() => allSourceColumns.map(c => ({ ...c })), [allSourceColumns]);
-  const bronzeOutputColumns = useMemo(() => computeLayerOutputColumns(baseSourceColumns, bronzeTransformations), [baseSourceColumns, bronzeTransformations, computeLayerOutputColumns]);
-  const silverOutputColumns = useMemo(() => computeLayerOutputColumns(bronzeOutputColumns, silverTransformations), [bronzeOutputColumns, silverTransformations, computeLayerOutputColumns]);
-  const goldOutputColumns = useMemo(() => computeLayerOutputColumns(silverOutputColumns, goldTransformations), [silverOutputColumns, goldTransformations, computeLayerOutputColumns]);
+  const bronzeOutputColumns = useMemo(() => computeLayerOutput('bronze', baseSourceColumns), [baseSourceColumns, computeLayerOutput]);
+  const silverOutputColumns = useMemo(() => computeLayerOutput('silver', bronzeOutputColumns), [bronzeOutputColumns, computeLayerOutput]);
+  const goldOutputColumns = useMemo(() => computeLayerOutput('gold', silverOutputColumns), [silverOutputColumns, computeLayerOutput]);
 
   const getLayerInputColumns = useCallback((layer: DagLayer): SourceColumn[] => {
     if (layer === 'bronze') return baseSourceColumns;
@@ -224,7 +279,6 @@ const CreatePipeline = () => {
     return [];
   }, [baseSourceColumns, bronzeOutputColumns, silverOutputColumns]);
 
-  // Group columns by source for display
   const getColumnsGroupedBySource = useCallback((layer: DagLayer): { sourceId: string; sourceName: string; columns: SourceColumn[] }[] => {
     const cols = getLayerInputColumns(layer);
     const groups: Record<string, { sourceId: string; sourceName: string; columns: SourceColumn[] }> = {};
@@ -235,21 +289,6 @@ const CreatePipeline = () => {
     });
     return Object.values(groups);
   }, [getLayerInputColumns]);
-
-  // ─── Layer transformations ─────────────────────────────────────────────────
-
-  const getLayerTransformations = useCallback((layer: DagLayer) => {
-    if (layer === 'bronze') return bronzeTransformations;
-    if (layer === 'silver') return silverTransformations;
-    if (layer === 'gold') return goldTransformations;
-    return [];
-  }, [bronzeTransformations, silverTransformations, goldTransformations]);
-
-  const setLayerTransformations = useCallback((layer: DagLayer, t: Transformation[]) => {
-    if (layer === 'bronze') setBronzeTransformations(t);
-    if (layer === 'silver') setSilverTransformations(t);
-    if (layer === 'gold') setGoldTransformations(t);
-  }, []);
 
   // ─── Source handlers ───────────────────────────────────────────────────────
 
@@ -283,9 +322,7 @@ const CreatePipeline = () => {
     if (!src) return;
     if (!src.fileMask.trim()) { toast.error('Enter a file mask first'); return; }
     if (!src.contractFile) { toast.error('Upload a data contract first'); return; }
-
     updateSource(sourceId, { searching: true, dbfsFiles: [], selectedFiles: [] });
-
     setTimeout(() => {
       const idx = sources.findIndex(s => s.id === sourceId);
       const files = generateMockDbfsFiles(src.fileMask, idx);
@@ -302,28 +339,47 @@ const CreatePipeline = () => {
     updateSource(sourceId, { selectedFiles: newSel });
   };
 
-  // ─── Transformation handlers ──────────────────────────────────────────────
+  // ─── Transformation handlers (per-source aware) ──────────────────────────
 
-  const addTransformation = (type: TransformationType) => {
+  const addTransformation = (type: TransformationType, targetSourceId?: string) => {
     if (!activeLayer || activeLayer === 'source') return;
-    const current = getLayerTransformations(activeLayer);
+    const isCross = !targetSourceId || targetSourceId === 'cross';
+    const key = isCross ? 'cross' : targetSourceId;
+    const current = isCross ? getCrossTransformations(activeLayer) : getSourceTransformations(activeLayer, targetSourceId);
     const newT: Transformation = {
-      id: `t-${Date.now()}`, order: current.length + 1, type, config: {}, sourceColumns: [],
+      id: `t-${Date.now()}`, order: current.length + 1, type, config: {},
+      sourceColumns: [],
       description: availableTransformationTypes.find(t => t.type === type)?.label || type,
     };
-    setLayerTransformations(activeLayer, [...current, newT]);
+    if (isCross) {
+      setCrossTransformations(activeLayer, [...current, newT]);
+    } else {
+      setSourceTransformations(activeLayer, targetSourceId, [...current, newT]);
+    }
   };
 
-  const removeTransformation = (id: string) => {
+  const removeTransformation = (id: string, targetSourceId?: string) => {
     if (!activeLayer || activeLayer === 'source') return;
-    const current = getLayerTransformations(activeLayer);
-    setLayerTransformations(activeLayer, current.filter(t => t.id !== id).map((t, i) => ({ ...t, order: i + 1 })));
+    const isCross = !targetSourceId || targetSourceId === 'cross';
+    if (isCross) {
+      const current = getCrossTransformations(activeLayer);
+      setCrossTransformations(activeLayer, current.filter(t => t.id !== id).map((t, i) => ({ ...t, order: i + 1 })));
+    } else {
+      const current = getSourceTransformations(activeLayer, targetSourceId);
+      setSourceTransformations(activeLayer, targetSourceId, current.filter(t => t.id !== id).map((t, i) => ({ ...t, order: i + 1 })));
+    }
   };
 
-  const updateTransformation = (id: string, updates: Partial<Transformation>) => {
+  const updateTransformation = (id: string, updates: Partial<Transformation>, targetSourceId?: string) => {
     if (!activeLayer || activeLayer === 'source') return;
-    const current = getLayerTransformations(activeLayer);
-    setLayerTransformations(activeLayer, current.map(t => t.id === id ? { ...t, ...updates } : t));
+    const isCross = !targetSourceId || targetSourceId === 'cross';
+    if (isCross) {
+      const current = getCrossTransformations(activeLayer);
+      setCrossTransformations(activeLayer, current.map(t => t.id === id ? { ...t, ...updates } : t));
+    } else {
+      const current = getSourceTransformations(activeLayer, targetSourceId);
+      setSourceTransformations(activeLayer, targetSourceId, current.map(t => t.id === id ? { ...t, ...updates } : t));
+    }
   };
 
   // ─── Quality Check handlers ────────────────────────────────────────────────
@@ -354,9 +410,25 @@ const CreatePipeline = () => {
 
     setTimeout(() => {
       const lower = userMsg.toLowerCase();
-      const current = getLayerTransformations(activeLayer);
       const inputCols = getLayerInputColumns(activeLayer);
       const newT: Transformation[] = [];
+      // Detect which source the user is referring to
+      let targetSourceId: string | undefined;
+      let isCross = false;
+      sources.forEach((s, i) => {
+        if (lower.includes(`source ${i + 1}`) || lower.includes(s.name.toLowerCase())) {
+          targetSourceId = s.id;
+        }
+      });
+      if (lower.includes('join') || lower.includes('cross') || lower.includes('merge sources')) {
+        isCross = true;
+      }
+      if (!targetSourceId && !isCross && sources.length === 1) {
+        targetSourceId = sources[0].id;
+      }
+
+      const currentKey = isCross ? 'cross' : (targetSourceId || sources[0]?.id || 'cross');
+      const current = isCross ? getCrossTransformations(activeLayer) : getSourceTransformations(activeLayer, currentKey);
 
       if (lower.includes('filter')) {
         const cond = lower.includes('cancel') ? "status != 'cancelled'" : lower.includes('amount') ? 'amount > 0' : "status = 'completed'";
@@ -374,7 +446,8 @@ const CreatePipeline = () => {
       }
       if (lower.includes('join')) {
         const joinCol = lower.includes('client') ? 'client_id' : inputCols[0]?.name || 'id';
-        newT.push({ id: `t-${Date.now()}-j`, order: current.length + newT.length + 1, type: 'join', config: { joinType: 'inner', joinColumn: joinCol }, sourceColumns: [joinCol], description: `Join on ${joinCol}` });
+        isCross = true;
+        newT.push({ id: `t-${Date.now()}-j`, order: current.length + newT.length + 1, type: 'join', config: { joinType: 'inner', joinColumn: joinCol, leftSource: sources[0]?.name, rightSource: sources[1]?.name || sources[0]?.name }, sourceColumns: [joinCol], description: `Join ${sources[0]?.name} ↔ ${sources[1]?.name || '?'} on ${joinCol}` });
       }
       if (lower.includes('deduplic') || lower.includes('duplicate')) {
         newT.push({ id: `t-${Date.now()}-dd`, order: current.length + newT.length + 1, type: 'deduplicate', config: {}, sourceColumns: ['*'], description: 'Remove duplicate rows' });
@@ -397,10 +470,16 @@ const CreatePipeline = () => {
 
       let response: string;
       if (newT.length > 0) {
-        setLayerTransformations(activeLayer, [...current, ...newT]);
-        response = `✅ Created **${newT.length} transformation(s)** for **${activeLayer.toUpperCase()}**:\n\n${newT.map((t, i) => `${i + 1}. **${t.type.replace('_', ' ').toUpperCase()}** — ${t.description}`).join('\n')}\n\nYou can edit each one or ask me for more.`;
+        const finalKey = isCross ? 'cross' : (targetSourceId || sources[0]?.id);
+        if (isCross) {
+          setCrossTransformations(activeLayer, [...getCrossTransformations(activeLayer), ...newT]);
+        } else if (finalKey) {
+          setSourceTransformations(activeLayer, finalKey, [...getSourceTransformations(activeLayer, finalKey), ...newT]);
+        }
+        const target = isCross ? 'Cross-Source' : sources.find(s => s.id === targetSourceId)?.name || sources[0]?.name || 'Source';
+        response = `✅ Created **${newT.length} transformation(s)** for **${activeLayer.toUpperCase()} → ${target}**:\n\n${newT.map((t, i) => `${i + 1}. **${t.type.replace('_', ' ').toUpperCase()}** — ${t.description}`).join('\n')}\n\nYou can edit each one or ask me for more.`;
       } else {
-        response = "I couldn't parse that. Try:\n• \"Filter rows where status is cancelled\"\n• \"Join on client_id\"\n• \"Rename transaction_date to txn_date, cast amount to DECIMAL\"\n• \"Drop column email, deduplicate, sort by date\"";
+        response = "I couldn't parse that. Try:\n• \"Filter rows where status is cancelled in Source 1\"\n• \"Join Source 1 and Source 2 on client_id\"\n• \"Rename transaction_date to txn_date in Source 1\"\n• \"Drop column email in Source 2, deduplicate, sort by date\"";
       }
       setChatMessages(prev => [...prev, { role: 'assistant', content: response }]);
       setAiLoading(false);
@@ -461,7 +540,7 @@ const CreatePipeline = () => {
     setExecStatus('success');
   };
 
-  const allTransformations = [...bronzeTransformations, ...silverTransformations, ...goldTransformations];
+  const allTransformations = getAllLayerTransformations('bronze').concat(getAllLayerTransformations('silver')).concat(getAllLayerTransformations('gold'));
   const sourcesReady = sources.every(s => s.contractValid && s.selectedFiles.length > 0);
   const canNext = step === 0 ? true : step === 1 ? !!pipelineName && !!outputTableName : false;
 
@@ -472,8 +551,64 @@ const CreatePipeline = () => {
     { key: 'gold', label: 'Gold', icon: <Layers className="h-5 w-5" />, color: 'text-warning', bgColor: 'bg-warning/5', borderColor: 'border-warning/30' },
   ];
 
-  const currentTransformations = activeLayer ? getLayerTransformations(activeLayer) : [];
-  const currentInputColumns = activeLayer ? getLayerInputColumns(activeLayer) : [];
+  // ─── Render helper: transformation card ────────────────────────────────────
+
+  const renderTransformationCard = (t: Transformation, sourceId: string, availableCols: SourceColumn[]) => (
+    <Card key={t.id} className="border bg-muted/30">
+      <CardContent className="p-3 flex items-start gap-3">
+        <div className="flex items-center gap-2 shrink-0 pt-0.5">
+          <GripVertical className="h-4 w-4 text-muted-foreground cursor-grab" />
+          <Badge variant="outline" className="text-xs font-mono w-7 justify-center">{t.order}</Badge>
+        </div>
+        <div className="flex-1 min-w-0 space-y-2">
+          <div className="flex items-center gap-2">
+            <Badge className="bg-primary/10 text-primary text-[10px]">{t.type.replace('_', ' ').toUpperCase()}</Badge>
+            <span className="text-xs font-medium">{t.description}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <Label className="text-[10px]">Source Column(s)</Label>
+              <Select value={t.sourceColumns[0] || ''} onValueChange={(v) => updateTransformation(t.id, { sourceColumns: [v] }, sourceId)}>
+                <SelectTrigger className="h-7 text-xs"><SelectValue placeholder="Select column" /></SelectTrigger>
+                <SelectContent>{availableCols.map(c => <SelectItem key={`${c.id}-sel`} value={c.name}>{c.name} <span className="text-muted-foreground">({c.sourceName})</span></SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            {t.type === 'rename' && <div><Label className="text-[10px]">New Name</Label><Input className="h-7 text-xs" value={(t.config.newName as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, newName: e.target.value } }, sourceId)} /></div>}
+            {t.type === 'cast' && <div><Label className="text-[10px]">Target Type</Label><Select value={(t.config.targetType as string) || ''} onValueChange={(v) => updateTransformation(t.id, { config: { ...t.config, targetType: v } }, sourceId)}><SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger><SelectContent>{['STRING','INTEGER','DECIMAL','DATE','BOOLEAN','TIMESTAMP'].map(tp => <SelectItem key={tp} value={tp}>{tp}</SelectItem>)}</SelectContent></Select></div>}
+            {t.type === 'filter' && <div><Label className="text-[10px]">Condition (SQL)</Label><Input className="h-7 text-xs font-mono" value={(t.config.condition as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, condition: e.target.value } }, sourceId)} /></div>}
+            {t.type === 'add_column' && <div><Label className="text-[10px]">Expression</Label><Input className="h-7 text-xs font-mono" value={(t.config.expression as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, expression: e.target.value } }, sourceId)} /></div>}
+            {t.type === 'aggregate' && <div><Label className="text-[10px]">Group By</Label><Input className="h-7 text-xs font-mono" value={(t.config.groupBy as string[])?.join(', ') || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, groupBy: e.target.value.split(',').map(s => s.trim()) } }, sourceId)} /></div>}
+            {t.type === 'join' && (
+              <div className="col-span-2 grid grid-cols-3 gap-2">
+                <div><Label className="text-[10px]">Join Column</Label><Input className="h-7 text-xs font-mono" value={(t.config.joinColumn as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, joinColumn: e.target.value } }, sourceId)} /></div>
+                <div><Label className="text-[10px]">Join Type</Label>
+                  <Select value={(t.config.joinType as string) || 'inner'} onValueChange={(v) => updateTransformation(t.id, { config: { ...t.config, joinType: v } }, sourceId)}>
+                    <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="inner">INNER</SelectItem>
+                      <SelectItem value="left">LEFT</SelectItem>
+                      <SelectItem value="right">RIGHT</SelectItem>
+                      <SelectItem value="full">FULL OUTER</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div><Label className="text-[10px]">Right Source</Label>
+                  <Select value={(t.config.rightSource as string) || ''} onValueChange={(v) => updateTransformation(t.id, { config: { ...t.config, rightSource: v } }, sourceId)}>
+                    <SelectTrigger className="h-7 text-xs"><SelectValue placeholder="Select source" /></SelectTrigger>
+                    <SelectContent>{sources.map(s => <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )}
+            {t.type === 'custom_sql' && <div className="col-span-2"><Label className="text-[10px]">SQL</Label><Textarea className="text-xs font-mono" rows={2} value={(t.config.sql as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, sql: e.target.value } }, sourceId)} /></div>}
+          </div>
+        </div>
+        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-destructive" onClick={() => removeTransformation(t.id, sourceId)}>
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </CardContent>
+    </Card>
+  );
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
@@ -497,7 +632,7 @@ const CreatePipeline = () => {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Pipeline Builder — Databricks DLT Flow</CardTitle>
-              <p className="text-xs text-muted-foreground">Click <strong>Source</strong> to define data sources (file masks + data contracts). Click <strong>Bronze / Silver / Gold</strong> to configure transformations & quality checks. Data flows left to right — output of each layer becomes input of the next.</p>
+              <p className="text-xs text-muted-foreground">Click <strong>Source</strong> to define data sources. Click <strong>Bronze / Silver / Gold</strong> to configure per-source transformations, quality checks, and cross-source operations (JOIN).</p>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-center gap-0 py-8 overflow-x-auto">
@@ -507,7 +642,7 @@ const CreatePipeline = () => {
                       className={`relative cursor-pointer transition-all hover:scale-105 border-2 rounded-xl px-6 py-5 min-w-[170px] text-center ${layer.bgColor} ${layer.borderColor} hover:shadow-lg`}
                       onClick={() => {
                         if (layer.key === 'source') setEditingSourceId(sources[0]?.id || null);
-                        else setActiveLayer(layer.key);
+                        else { setActiveLayer(layer.key); setActiveTransformationTab(sources[0]?.id || 'cross'); }
                       }}
                     >
                       <div className={`flex items-center justify-center gap-2 mb-2 ${layer.color}`}>
@@ -523,22 +658,19 @@ const CreatePipeline = () => {
                         </div>
                       ) : (
                         <div className="space-y-1">
-                          <p className="text-xs font-medium">{getLayerTransformations(layer.key).length} transformation(s)</p>
+                          <p className="text-xs font-medium">{getLayerTransformationCount(layer.key)} transformation(s)</p>
                           {layer.key === 'bronze' && qualityChecks.length > 0 && (
                             <p className="text-[10px] text-muted-foreground">{qualityChecks.length} quality check(s)</p>
                           )}
-                          {getLayerTransformations(layer.key).length > 0 && (
-                            <div className="flex flex-wrap gap-1 justify-center">
-                              {getLayerTransformations(layer.key).slice(0, 3).map(t => (
-                                <Badge key={t.id} variant="outline" className="text-[9px]">{t.type.replace('_', ' ')}</Badge>
-                              ))}
-                              {getLayerTransformations(layer.key).length > 3 && <Badge variant="outline" className="text-[9px]">+{getLayerTransformations(layer.key).length - 3}</Badge>}
-                            </div>
+                          {getCrossTransformations(layer.key).length > 0 && (
+                            <Badge variant="outline" className="text-[9px] border-info/30 text-info">
+                              <Link2 className="h-2.5 w-2.5 mr-0.5" />{getCrossTransformations(layer.key).length} cross-source
+                            </Badge>
                           )}
                           <p className="text-[10px] text-muted-foreground mt-1">Click to configure</p>
                         </div>
                       )}
-                      {layer.key !== 'source' && getLayerTransformations(layer.key).length > 0 && (
+                      {layer.key !== 'source' && getLayerTransformationCount(layer.key) > 0 && (
                         <div className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-success flex items-center justify-center">
                           <Check className="h-3 w-3 text-success-foreground" />
                         </div>
@@ -566,15 +698,15 @@ const CreatePipeline = () => {
                   <p className="text-xs text-muted-foreground">Sources</p>
                 </div>
                 <div className="bg-warning/10 rounded-lg p-3">
-                  <p className="text-2xl font-bold text-warning">{bronzeTransformations.length}</p>
+                  <p className="text-2xl font-bold text-warning">{getLayerTransformationCount('bronze')}</p>
                   <p className="text-xs text-muted-foreground">Bronze</p>
                 </div>
                 <div className="bg-muted rounded-lg p-3">
-                  <p className="text-2xl font-bold text-muted-foreground">{silverTransformations.length}</p>
+                  <p className="text-2xl font-bold text-muted-foreground">{getLayerTransformationCount('silver')}</p>
                   <p className="text-xs text-muted-foreground">Silver</p>
                 </div>
                 <div className="bg-warning/5 rounded-lg p-3">
-                  <p className="text-2xl font-bold text-warning">{goldTransformations.length}</p>
+                  <p className="text-2xl font-bold text-warning">{getLayerTransformationCount('gold')}</p>
                   <p className="text-xs text-muted-foreground">Gold</p>
                 </div>
               </div>
@@ -613,7 +745,7 @@ const CreatePipeline = () => {
                       className="h-7 w-48 text-sm font-semibold"
                     />
                     {src.contractValid && src.selectedFiles.length > 0 && (
-                      <Badge className="bg-success text-success-foreground text-[9px]"><Check className="h-3 w-3 mr-1" />Ready</Badge>
+                      <Badge className="bg-success text-success-foreground text-[9px]">Ready</Badge>
                     )}
                   </CardTitle>
                   {sources.length > 1 && (
@@ -624,79 +756,39 @@ const CreatePipeline = () => {
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                {/* Contract Upload */}
-                <div>
-                  <Label className="text-xs font-medium mb-2 block">Data Contract</Label>
-                  <div
-                    className={`border-2 border-dashed rounded-lg p-4 text-center transition-colors ${src.contractFile ? 'border-success bg-success/5' : 'border-border hover:border-primary'}`}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) { const idx = sources.findIndex(s => s.id === src.id); updateSource(src.id, { contractFile: f, contractValid: true, columns: idx === 0 ? mockSchemaColumns : secondSourceColumns }); }}}
-                  >
-                    {!src.contractFile ? (
-                      <label className="cursor-pointer block">
-                        <Upload className="h-6 w-6 mx-auto text-muted-foreground mb-1" />
-                        <p className="text-xs font-medium">Drop data contract (.xlsx, .xls)</p>
-                        <input type="file" accept=".xlsx,.xls" className="hidden" onChange={(e) => handleSourceContractUpload(src.id, e)} />
-                      </label>
-                    ) : (
-                      <div className="flex items-center justify-center gap-2">
-                        <FileSpreadsheet className="h-4 w-4 text-success" />
-                        <span className="text-xs font-medium">{src.contractFile.name}</span>
-                        <Badge variant="outline" className="text-[9px]">{src.columns.length} columns</Badge>
-                        <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => updateSource(src.id, { contractFile: null, contractValid: false, columns: [], dbfsFiles: [], selectedFiles: [] })}>
-                          <X className="h-3 w-3" />
-                        </Button>
+                {/* Data Contract Upload */}
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">Data Contract</Label>
+                  {!src.contractFile ? (
+                    <label className="flex flex-col items-center justify-center border-2 border-dashed rounded-lg p-6 cursor-pointer hover:border-primary/50 transition-colors">
+                      <Upload className="h-8 w-8 text-muted-foreground mb-2" />
+                      <p className="text-xs font-medium">Upload Excel contract</p>
+                      <p className="text-[10px] text-muted-foreground">.xlsx, .xls — max 10MB</p>
+                      <input type="file" className="hidden" accept=".xlsx,.xls" onChange={(e) => handleSourceContractUpload(src.id, e)} />
+                    </label>
+                  ) : (
+                    <div className="flex items-center gap-3 bg-success/5 border border-success/20 rounded-lg p-3">
+                      <FileSpreadsheet className="h-5 w-5 text-success" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium truncate">{src.contractFile.name}</p>
+                        <p className="text-[10px] text-success">{src.columns.length} columns detected</p>
                       </div>
-                    )}
-                  </div>
+                      <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => updateSource(src.id, { contractFile: null, contractValid: false, columns: [] })}>
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  )}
                 </div>
 
-                {/* Schema preview */}
-                {src.columns.length > 0 && (
-                  <div className="border rounded-lg overflow-hidden">
-                    <Table>
-                      <TableHeader>
-                        <TableRow className="bg-muted/50">
-                          <TableHead className="text-[10px]">Column</TableHead>
-                          <TableHead className="text-[10px]">Type</TableHead>
-                          <TableHead className="text-[10px]">Nullable</TableHead>
-                          <TableHead className="text-[10px]">Sensitive</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {src.columns.map(col => (
-                          <TableRow key={col.id} className="text-[11px]">
-                            <TableCell className="py-1 font-mono">{col.name}</TableCell>
-                            <TableCell className="py-1"><Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge></TableCell>
-                            <TableCell className="py-1">{col.nullable ? 'Yes' : 'No'}</TableCell>
-                            <TableCell className="py-1">{col.sensitive ? <Badge variant="outline" className="text-[9px] text-destructive border-destructive/30">PII</Badge> : '—'}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
-
                 {/* File Mask + DBFS Search */}
-                <div>
-                  <Label className="text-xs font-medium mb-2 block">File Mask & DBFS Path</Label>
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">File Mask & DBFS Path</Label>
                   <div className="flex gap-2">
-                    <Input
-                      placeholder="DBFS path: /mnt/data/raw/"
-                      value={src.dbfsPath}
-                      onChange={(e) => updateSource(src.id, { dbfsPath: e.target.value })}
-                      className="w-48 text-xs"
-                    />
-                    <Input
-                      placeholder="File mask: transactions_*.csv"
-                      value={src.fileMask}
-                      onChange={(e) => updateSource(src.id, { fileMask: e.target.value })}
-                      className="flex-1 text-xs"
-                      onKeyDown={(e) => e.key === 'Enter' && handleSourceSearchDbfs(src.id)}
-                    />
-                    <Button size="sm" onClick={() => handleSourceSearchDbfs(src.id)} disabled={src.searching || !src.contractFile} className="gap-2 text-xs">
-                      {src.searching ? <div className="h-3 w-3 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin" /> : <FolderSearch className="h-3.5 w-3.5" />}
-                      Search
+                    <Input className="flex-1 text-xs" placeholder="/mnt/data/raw/" value={src.dbfsPath} onChange={(e) => updateSource(src.id, { dbfsPath: e.target.value })} />
+                    <Input className="w-40 text-xs" placeholder="*.csv or txn_*.parquet" value={src.fileMask} onChange={(e) => updateSource(src.id, { fileMask: e.target.value })} />
+                    <Button variant="outline" size="sm" className="gap-1 text-xs shrink-0" onClick={() => handleSourceSearchDbfs(src.id)} disabled={src.searching}>
+                      {src.searching ? <div className="h-3 w-3 border-2 border-primary border-t-transparent rounded-full animate-spin" /> : <FolderSearch className="h-3.5 w-3.5" />}
+                      Search DBFS
                     </Button>
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-1">Only files matching the mask are returned. Rows not matching the data contract are rescued to Quarantine.</p>
@@ -765,227 +857,289 @@ const CreatePipeline = () => {
       {/* ============ Layer Editor (Bronze/Silver/Gold) ============ */}
       {step === 0 && activeLayer && activeLayer !== 'source' && (
         <div className="space-y-4">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" onClick={() => setActiveLayer(null)}>
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-            <div>
-              <h2 className="text-lg font-bold">{activeLayer.charAt(0).toUpperCase() + activeLayer.slice(1)} Layer — Schema & Transformations</h2>
-              <p className="text-xs text-muted-foreground">
-                {activeLayer === 'bronze' && 'Input: raw source columns. Define transformations and quality checks.'}
-                {activeLayer === 'silver' && 'Input: Bronze output (post-transformation). Apply further cleaning & enrichment.'}
-                {activeLayer === 'gold' && 'Input: Silver output. Apply final aggregations and business logic.'}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex gap-4">
-            {/* Left: Input Columns grouped by source */}
-            <div className="w-1/3 space-y-4">
-              {getColumnsGroupedBySource(activeLayer).map(group => (
-                <Card key={group.sourceId}>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm flex items-center gap-2">
-                      <Database className="h-3.5 w-3.5 text-info" />
-                      {group.sourceName}
-                      <Badge variant="outline" className="text-[9px] ml-auto">{group.columns.length} cols</Badge>
-                    </CardTitle>
-                    {activeLayer !== 'bronze' && (
-                      <p className="text-[10px] text-muted-foreground">
-                        After {activeLayer === 'silver' ? 'Bronze' : 'Silver'} transformations
-                      </p>
-                    )}
-                  </CardHeader>
-                  <CardContent className="p-0">
-                    <ScrollArea className="max-h-[250px]">
-                      <Table>
-                        <TableHeader>
-                          <TableRow className="bg-muted/50">
-                            <TableHead className="text-[10px]">Column</TableHead>
-                            <TableHead className="text-[10px]">Type</TableHead>
-                            {activeLayer !== 'bronze' && <TableHead className="text-[10px]">Changed</TableHead>}
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {group.columns.map((col, i) => (
-                            <TableRow key={`${col.id}-${i}`} className={`text-[11px] ${col.transformed ? 'bg-primary/5' : ''}`}>
-                              <TableCell className="py-1 font-mono">
-                                {col.name}
-                                {col.transformedFrom && (
-                                  <span className="text-[9px] text-muted-foreground block">← {col.transformedFrom}</span>
-                                )}
-                              </TableCell>
-                              <TableCell className="py-1">
-                                <Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge>
-                              </TableCell>
-                              {activeLayer !== 'bronze' && (
-                                <TableCell className="py-1">
-                                  {col.transformed && (
-                                    <Badge className="bg-primary/10 text-primary text-[8px]">Modified</Badge>
-                                  )}
-                                </TableCell>
-                              )}
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </ScrollArea>
-                  </CardContent>
-                </Card>
-              ))}
-
-              {getColumnsGroupedBySource(activeLayer).length === 0 && (
-                <Card>
-                  <CardContent className="py-8 text-center text-muted-foreground text-sm">
-                    <p>No source columns. Configure sources first.</p>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Quality Checks (Bronze only) — per source */}
-              {activeLayer === 'bronze' && getColumnsGroupedBySource('bronze').map(group => (
-                <Card key={`qc-${group.sourceId}`}>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm flex items-center gap-2">
-                      <ShieldCheck className="h-4 w-4" /> Quality — {group.sourceName}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2">
-                    {qualityChecks.filter(qc => qc.sourceId === group.sourceId).length === 0 && (
-                      <p className="text-xs text-muted-foreground text-center py-2">No quality checks for this source.</p>
-                    )}
-                    {qualityChecks.filter(qc => qc.sourceId === group.sourceId).map(qc => (
-                      <div key={qc.id} className="border rounded-lg p-2 space-y-1">
-                        <div className="flex items-center justify-between">
-                          <Badge variant="outline" className="text-[9px] font-mono">{qc.columnName}</Badge>
-                          <Button variant="ghost" size="icon" className="h-5 w-5 text-destructive" onClick={() => removeQualityCheck(qc.id)}>
-                            <X className="h-3 w-3" />
-                          </Button>
-                        </div>
-                        <div className="grid grid-cols-2 gap-1">
-                          <Select value={qc.rule} onValueChange={(v) => updateQualityCheck(qc.id, { rule: v as any })}>
-                            <SelectTrigger className="h-6 text-[10px]"><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="not_null">Not Null</SelectItem>
-                              <SelectItem value="unique">Unique</SelectItem>
-                              <SelectItem value="range">Range</SelectItem>
-                              <SelectItem value="regex">Regex</SelectItem>
-                              <SelectItem value="values_in_set">Values In Set</SelectItem>
-                            </SelectContent>
-                          </Select>
-                          <Select value={qc.onFailure} onValueChange={(v) => updateQualityCheck(qc.id, { onFailure: v as any })}>
-                            <SelectTrigger className="h-6 text-[10px]"><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="quarantine">Quarantine</SelectItem>
-                              <SelectItem value="drop">Drop</SelectItem>
-                              <SelectItem value="warn">Warn</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        {qc.rule === 'range' && (
-                          <div className="flex gap-1">
-                            <Input className="h-6 text-[10px]" placeholder="Min" value={qc.config.min || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, min: e.target.value } })} />
-                            <Input className="h-6 text-[10px]" placeholder="Max" value={qc.config.max || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, max: e.target.value } })} />
-                          </div>
-                        )}
-                        {qc.rule === 'regex' && (
-                          <Input className="h-6 text-[10px] font-mono" placeholder="^[A-Z].*" value={qc.config.pattern || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, pattern: e.target.value } })} />
-                        )}
-                        {qc.rule === 'values_in_set' && (
-                          <Input className="h-6 text-[10px]" placeholder="val1, val2, val3" value={qc.config.values || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, values: e.target.value } })} />
-                        )}
-                      </div>
-                    ))}
-                    <Select onValueChange={(colName) => addQualityCheck(group.sourceId, colName)}>
-                      <SelectTrigger className="h-7 text-xs">
-                        <Plus className="h-3 w-3 mr-1" />
-                        <SelectValue placeholder="Add quality check..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {group.columns.map(c => <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-
-            {/* Right: Transformations */}
-            <div className="flex-1 space-y-4">
-              <Card>
-                <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                  <CardTitle className="text-sm">Transformations — {activeLayer.charAt(0).toUpperCase() + activeLayer.slice(1)}</CardTitle>
-                  <div className="flex gap-2">
-                    <Select onValueChange={(v) => addTransformation(v as TransformationType)}>
-                      <SelectTrigger className="h-8 w-44 text-xs">
-                        <Plus className="h-3.5 w-3.5 mr-1" />
-                        <SelectValue placeholder="Add transformation" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableTransformationTypes.map((t) => (
-                          <SelectItem key={t.type} value={t.type}>
-                            <div><span className="font-medium">{t.label}</span><span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span></div>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button variant="outline" size="sm" className="gap-2 h-8 text-xs" onClick={() => setAiOpen(true)}>
-                      <Sparkles className="h-3.5 w-3.5 text-primary" /> AI Agent
-                    </Button>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {currentTransformations.length === 0 ? (
-                    <div className="border border-dashed rounded-lg p-8 text-center text-muted-foreground">
-                      <p className="text-sm font-medium mb-1">No transformations for {activeLayer}</p>
-                      <p className="text-xs">Use <strong>+ Add transformation</strong> or <strong>AI Agent</strong> to configure.</p>
-                    </div>
-                  ) : (
-                    currentTransformations.map((t) => (
-                      <Card key={t.id} className="border bg-muted/30">
-                        <CardContent className="p-3 flex items-start gap-3">
-                          <div className="flex items-center gap-2 shrink-0 pt-0.5">
-                            <GripVertical className="h-4 w-4 text-muted-foreground cursor-grab" />
-                            <Badge variant="outline" className="text-xs font-mono w-7 justify-center">{t.order}</Badge>
-                          </div>
-                          <div className="flex-1 min-w-0 space-y-2">
-                            <div className="flex items-center gap-2">
-                              <Badge className="bg-primary/10 text-primary text-[10px]">{t.type.replace('_', ' ').toUpperCase()}</Badge>
-                              <span className="text-xs font-medium">{t.description}</span>
-                            </div>
-                            <div className="grid grid-cols-2 gap-2">
-                              <div>
-                                <Label className="text-[10px]">Source Column(s)</Label>
-                                <Select value={t.sourceColumns[0] || ''} onValueChange={(v) => updateTransformation(t.id, { sourceColumns: [v] })}>
-                                  <SelectTrigger className="h-7 text-xs"><SelectValue placeholder="Select column" /></SelectTrigger>
-                                  <SelectContent>{currentInputColumns.map(c => <SelectItem key={`${c.id}-sel`} value={c.name}>{c.name}</SelectItem>)}</SelectContent>
-                                </Select>
-                              </div>
-                              {t.type === 'rename' && <div><Label className="text-[10px]">New Name</Label><Input className="h-7 text-xs" value={(t.config.newName as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, newName: e.target.value } })} /></div>}
-                              {t.type === 'cast' && <div><Label className="text-[10px]">Target Type</Label><Select value={(t.config.targetType as string) || ''} onValueChange={(v) => updateTransformation(t.id, { config: { ...t.config, targetType: v } })}><SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger><SelectContent>{['STRING','INTEGER','DECIMAL','DATE','BOOLEAN','TIMESTAMP'].map(tp => <SelectItem key={tp} value={tp}>{tp}</SelectItem>)}</SelectContent></Select></div>}
-                              {t.type === 'filter' && <div><Label className="text-[10px]">Condition (SQL)</Label><Input className="h-7 text-xs font-mono" value={(t.config.condition as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, condition: e.target.value } })} /></div>}
-                              {t.type === 'add_column' && <div><Label className="text-[10px]">Expression</Label><Input className="h-7 text-xs font-mono" value={(t.config.expression as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, expression: e.target.value } })} /></div>}
-                              {t.type === 'aggregate' && <div><Label className="text-[10px]">Group By</Label><Input className="h-7 text-xs font-mono" value={(t.config.groupBy as string[])?.join(', ') || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, groupBy: e.target.value.split(',').map(s => s.trim()) } })} /></div>}
-                              {t.type === 'join' && <div><Label className="text-[10px]">Join Column</Label><Input className="h-7 text-xs font-mono" value={(t.config.joinColumn as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, joinColumn: e.target.value } })} /></div>}
-                              {t.type === 'custom_sql' && <div className="col-span-2"><Label className="text-[10px]">SQL</Label><Textarea className="text-xs font-mono" rows={2} value={(t.config.sql as string) || ''} onChange={(e) => updateTransformation(t.id, { config: { ...t.config, sql: e.target.value } })} /></div>}
-                            </div>
-                          </div>
-                          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-destructive" onClick={() => removeTransformation(t.id)}>
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </CardContent>
-                      </Card>
-                    ))
-                  )}
-                </CardContent>
-              </Card>
-
-              <div className="flex justify-end">
-                <Button className="gap-2" onClick={() => { setActiveLayer(null); toast.success(`${activeLayer} layer saved — ${currentTransformations.length} transformation(s)`); }}>
-                  <Check className="h-4 w-4" /> Validate & Return to Pipeline
-                </Button>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="icon" onClick={() => setActiveLayer(null)}>
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+              <div>
+                <h2 className="text-lg font-bold">{activeLayer.charAt(0).toUpperCase() + activeLayer.slice(1)} Layer — Schema & Transformations</h2>
+                <p className="text-xs text-muted-foreground">
+                  Each source has its own transformations. Use <strong>Cross-Source</strong> tab for operations like JOIN between sources.
+                </p>
               </div>
             </div>
+            <Button variant="outline" size="sm" className="gap-2" onClick={() => setAiOpen(true)}>
+              <Sparkles className="h-3.5 w-3.5 text-primary" /> AI Agent
+            </Button>
+          </div>
+
+          {/* Tabs: one per source + cross-source */}
+          <Tabs value={activeTransformationTab} onValueChange={setActiveTransformationTab}>
+            <TabsList className="flex-wrap h-auto gap-1">
+              {sources.map(s => (
+                <TabsTrigger key={s.id} value={s.id} className="gap-2 text-xs">
+                  <Database className="h-3 w-3" /> {s.name}
+                  {getSourceTransformations(activeLayer, s.id).length > 0 && (
+                    <Badge variant="secondary" className="text-[9px] h-4 px-1">{getSourceTransformations(activeLayer, s.id).length}</Badge>
+                  )}
+                </TabsTrigger>
+              ))}
+              <TabsTrigger value="cross" className="gap-2 text-xs">
+                <Link2 className="h-3 w-3" /> Cross-Source
+                {getCrossTransformations(activeLayer).length > 0 && (
+                  <Badge variant="secondary" className="text-[9px] h-4 px-1">{getCrossTransformations(activeLayer).length}</Badge>
+                )}
+              </TabsTrigger>
+            </TabsList>
+
+            {/* Per-source tabs */}
+            {sources.map(s => {
+              const sourceInputCols = getLayerInputColumns(activeLayer).filter(c => c.sourceId === s.id);
+              const sourceTransforms = getSourceTransformations(activeLayer, s.id);
+
+              return (
+                <TabsContent key={s.id} value={s.id} className="mt-4">
+                  <div className="flex gap-4">
+                    {/* Left: Source columns + quality checks */}
+                    <div className="w-1/3 space-y-4">
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm flex items-center gap-2">
+                            <Database className="h-3.5 w-3.5 text-info" />
+                            {s.name} — Input Columns
+                            <Badge variant="outline" className="text-[9px] ml-auto">{sourceInputCols.length} cols</Badge>
+                          </CardTitle>
+                          {activeLayer !== 'bronze' && (
+                            <p className="text-[10px] text-muted-foreground">
+                              After {activeLayer === 'silver' ? 'Bronze' : 'Silver'} transformations
+                            </p>
+                          )}
+                        </CardHeader>
+                        <CardContent className="p-0">
+                          <ScrollArea className="max-h-[300px]">
+                            <Table>
+                              <TableHeader>
+                                <TableRow className="bg-muted/50">
+                                  <TableHead className="text-[10px]">Column</TableHead>
+                                  <TableHead className="text-[10px]">Type</TableHead>
+                                  {activeLayer !== 'bronze' && <TableHead className="text-[10px]">Changed</TableHead>}
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {sourceInputCols.map((col, i) => (
+                                  <TableRow key={`${col.id}-${i}`} className={`text-[11px] ${col.transformed ? 'bg-primary/5' : ''}`}>
+                                    <TableCell className="py-1 font-mono">
+                                      {col.name}
+                                      {col.transformedFrom && (
+                                        <span className="text-[9px] text-muted-foreground block">← {col.transformedFrom}</span>
+                                      )}
+                                    </TableCell>
+                                    <TableCell className="py-1">
+                                      <Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge>
+                                    </TableCell>
+                                    {activeLayer !== 'bronze' && (
+                                      <TableCell className="py-1">
+                                        {col.transformed && <Badge className="bg-primary/10 text-primary text-[8px]">Modified</Badge>}
+                                      </TableCell>
+                                    )}
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </ScrollArea>
+                        </CardContent>
+                      </Card>
+
+                      {/* Quality Checks (Bronze only) */}
+                      {activeLayer === 'bronze' && (
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-sm flex items-center gap-2">
+                              <ShieldCheck className="h-4 w-4" /> Quality Checks
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-2">
+                            {qualityChecks.filter(qc => qc.sourceId === s.id).length === 0 && (
+                              <p className="text-xs text-muted-foreground text-center py-2">No quality checks for this source.</p>
+                            )}
+                            {qualityChecks.filter(qc => qc.sourceId === s.id).map(qc => (
+                              <div key={qc.id} className="border rounded-lg p-2 space-y-1">
+                                <div className="flex items-center justify-between">
+                                  <Badge variant="outline" className="text-[9px] font-mono">{qc.columnName}</Badge>
+                                  <Button variant="ghost" size="icon" className="h-5 w-5 text-destructive" onClick={() => removeQualityCheck(qc.id)}>
+                                    <X className="h-3 w-3" />
+                                  </Button>
+                                </div>
+                                <div className="grid grid-cols-2 gap-1">
+                                  <Select value={qc.rule} onValueChange={(v) => updateQualityCheck(qc.id, { rule: v as any })}>
+                                    <SelectTrigger className="h-6 text-[10px]"><SelectValue /></SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="not_null">Not Null</SelectItem>
+                                      <SelectItem value="unique">Unique</SelectItem>
+                                      <SelectItem value="range">Range</SelectItem>
+                                      <SelectItem value="regex">Regex</SelectItem>
+                                      <SelectItem value="values_in_set">Values In Set</SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                  <Select value={qc.onFailure} onValueChange={(v) => updateQualityCheck(qc.id, { onFailure: v as any })}>
+                                    <SelectTrigger className="h-6 text-[10px]"><SelectValue /></SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="quarantine">Quarantine</SelectItem>
+                                      <SelectItem value="drop">Drop</SelectItem>
+                                      <SelectItem value="warn">Warn</SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                {qc.rule === 'range' && (
+                                  <div className="flex gap-1">
+                                    <Input className="h-6 text-[10px]" placeholder="Min" value={qc.config.min || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, min: e.target.value } })} />
+                                    <Input className="h-6 text-[10px]" placeholder="Max" value={qc.config.max || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, max: e.target.value } })} />
+                                  </div>
+                                )}
+                                {qc.rule === 'regex' && (
+                                  <Input className="h-6 text-[10px] font-mono" placeholder="^[A-Z].*" value={qc.config.pattern || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, pattern: e.target.value } })} />
+                                )}
+                                {qc.rule === 'values_in_set' && (
+                                  <Input className="h-6 text-[10px]" placeholder="val1, val2, val3" value={qc.config.values || ''} onChange={e => updateQualityCheck(qc.id, { config: { ...qc.config, values: e.target.value } })} />
+                                )}
+                              </div>
+                            ))}
+                            <Select onValueChange={(colName) => addQualityCheck(s.id, colName)}>
+                              <SelectTrigger className="h-7 text-xs">
+                                <Plus className="h-3 w-3 mr-1" />
+                                <SelectValue placeholder="Add quality check..." />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {sourceInputCols.map(c => <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>)}
+                              </SelectContent>
+                            </Select>
+                          </CardContent>
+                        </Card>
+                      )}
+                    </div>
+
+                    {/* Right: Transformations for this source */}
+                    <div className="flex-1 space-y-4">
+                      <Card>
+                        <CardHeader className="pb-2 flex flex-row items-center justify-between">
+                          <CardTitle className="text-sm">Transformations — {s.name}</CardTitle>
+                          <Select onValueChange={(v) => addTransformation(v as TransformationType, s.id)}>
+                            <SelectTrigger className="h-8 w-48 text-xs">
+                              <Plus className="h-3.5 w-3.5 mr-1" />
+                              <SelectValue placeholder="+ Add transformation" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {availableTransformationTypes.filter(t => t.type !== 'join').map((t) => (
+                                <SelectItem key={t.type} value={t.type}>
+                                  <div><span className="font-medium">{t.label}</span><span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span></div>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </CardHeader>
+                        <CardContent className="space-y-2">
+                          {sourceTransforms.length === 0 ? (
+                            <div className="border border-dashed rounded-lg p-8 text-center text-muted-foreground">
+                              <p className="text-sm font-medium mb-1">No transformations for {s.name} in {activeLayer}</p>
+                              <p className="text-xs">Use <strong>+ Add transformation</strong> or <strong>AI Agent</strong> to configure.</p>
+                            </div>
+                          ) : (
+                            sourceTransforms.map(t => renderTransformationCard(t, s.id, sourceInputCols))
+                          )}
+                        </CardContent>
+                      </Card>
+                    </div>
+                  </div>
+                </TabsContent>
+              );
+            })}
+
+            {/* Cross-Source tab */}
+            <TabsContent value="cross" className="mt-4">
+              <div className="flex gap-4">
+                {/* Left: All source columns overview */}
+                <div className="w-1/3 space-y-4">
+                  {getColumnsGroupedBySource(activeLayer).map(group => (
+                    <Card key={group.sourceId}>
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm flex items-center gap-2">
+                          <Database className="h-3.5 w-3.5 text-info" />
+                          {group.sourceName}
+                          <Badge variant="outline" className="text-[9px] ml-auto">{group.columns.length} cols</Badge>
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="p-0">
+                        <ScrollArea className="max-h-[180px]">
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="bg-muted/50">
+                                <TableHead className="text-[10px]">Column</TableHead>
+                                <TableHead className="text-[10px]">Type</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {group.columns.map((col, i) => (
+                                <TableRow key={`${col.id}-${i}`} className="text-[11px]">
+                                  <TableCell className="py-1 font-mono">{col.name}</TableCell>
+                                  <TableCell className="py-1"><Badge className={`${typeColors[col.type]} text-[9px]`}>{col.type}</Badge></TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </ScrollArea>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+
+                {/* Right: Cross-source transformations (JOIN, etc.) */}
+                <div className="flex-1 space-y-4">
+                  <Card>
+                    <CardHeader className="pb-2 flex flex-row items-center justify-between">
+                      <div>
+                        <CardTitle className="text-sm flex items-center gap-2">
+                          <Link2 className="h-4 w-4 text-info" /> Cross-Source Transformations
+                        </CardTitle>
+                        <p className="text-[10px] text-muted-foreground mt-1">
+                          Use JOIN to combine columns from different sources. These are applied after per-source transformations.
+                        </p>
+                      </div>
+                      <Select onValueChange={(v) => addTransformation(v as TransformationType, 'cross')}>
+                        <SelectTrigger className="h-8 w-48 text-xs">
+                          <Plus className="h-3.5 w-3.5 mr-1" />
+                          <SelectValue placeholder="+ Add transformation" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {availableTransformationTypes.map((t) => (
+                            <SelectItem key={t.type} value={t.type}>
+                              <div><span className="font-medium">{t.label}</span><span className="text-muted-foreground ml-2 text-[10px]">{t.description}</span></div>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      {getCrossTransformations(activeLayer).length === 0 ? (
+                        <div className="border border-dashed rounded-lg p-8 text-center text-muted-foreground">
+                          <Link2 className="h-8 w-8 mx-auto mb-2 opacity-40" />
+                          <p className="text-sm font-medium mb-1">No cross-source transformations</p>
+                          <p className="text-xs">Add a <strong>JOIN</strong> to combine data from multiple sources, or any transformation that operates across all sources.</p>
+                        </div>
+                      ) : (
+                        getCrossTransformations(activeLayer).map(t => renderTransformationCard(t, 'cross', getLayerInputColumns(activeLayer)))
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
+
+          <div className="flex justify-end">
+            <Button className="gap-2" onClick={() => { setActiveLayer(null); toast.success(`${activeLayer} layer saved — ${getLayerTransformationCount(activeLayer)} transformation(s)`); }}>
+              <Check className="h-4 w-4" /> Validate & Return to Pipeline
+            </Button>
           </div>
 
           {/* AI Agent Sheet */}
@@ -1016,7 +1170,7 @@ const CreatePipeline = () => {
                 </div>
               </ScrollArea>
               <div className="flex gap-2 mt-4 pt-4 border-t">
-                <Input placeholder="e.g. Filter cancelled rows, join on client_id..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && !aiLoading && handleSendChat()} className="text-sm" disabled={aiLoading} />
+                <Input placeholder="e.g. Filter cancelled rows in Source 1, join on client_id..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && !aiLoading && handleSendChat()} className="text-sm" disabled={aiLoading} />
                 <Button size="icon" onClick={handleSendChat} disabled={aiLoading || !chatInput.trim()}>
                   <Send className="h-4 w-4" />
                 </Button>
@@ -1044,7 +1198,9 @@ const CreatePipeline = () => {
             <Switch checked={scheduled} onCheckedChange={setScheduled} /><Label>Enable Scheduling</Label>
             {scheduled && <Input className="w-48" value={cronExpr} onChange={(e) => setCronExpr(e.target.value)} />}
           </div>
-          <div className="flex items-center gap-2"><Switch checked={notifications} onCheckedChange={setNotifications} /><Label className="text-sm">Email notifications</Label></div>
+          <div className="flex items-center gap-4">
+            <Switch checked={notifications} onCheckedChange={setNotifications} /><Label>Enable Notifications</Label>
+          </div>
 
           <Card>
             <CardHeader className="pb-2"><CardTitle className="text-sm">Pipeline Summary</CardTitle></CardHeader>
@@ -1054,19 +1210,18 @@ const CreatePipeline = () => {
                   <p className="text-lg font-bold text-info">{sources.length}</p><p className="text-[10px] text-muted-foreground">Sources</p>
                 </div>
                 <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 text-center">
-                  <p className="text-lg font-bold text-warning">{bronzeTransformations.length}</p><p className="text-[10px] text-muted-foreground">Bronze</p>
+                  <p className="text-lg font-bold text-warning">{getLayerTransformationCount('bronze')}</p><p className="text-[10px] text-muted-foreground">Bronze</p>
                 </div>
                 <div className="bg-muted border rounded-lg p-3 text-center">
-                  <p className="text-lg font-bold text-muted-foreground">{silverTransformations.length}</p><p className="text-[10px] text-muted-foreground">Silver</p>
+                  <p className="text-lg font-bold text-muted-foreground">{getLayerTransformationCount('silver')}</p><p className="text-[10px] text-muted-foreground">Silver</p>
                 </div>
                 <div className="bg-warning/5 border border-warning/20 rounded-lg p-3 text-center">
-                  <p className="text-lg font-bold text-warning">{goldTransformations.length}</p><p className="text-[10px] text-muted-foreground">Gold</p>
+                  <p className="text-lg font-bold text-warning">{getLayerTransformationCount('gold')}</p><p className="text-[10px] text-muted-foreground">Gold</p>
                 </div>
                 <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-destructive">{totalRescuedRows.toLocaleString()}</p><p className="text-[10px] text-muted-foreground">Rescued</p>
                 </div>
               </div>
-              {/* Sources detail */}
               <div className="space-y-1 mb-3">
                 {sources.map(s => (
                   <div key={s.id} className="flex items-center gap-2 text-xs">
@@ -1096,23 +1251,30 @@ from pyspark.sql.functions import *
 
 ${sources.map((s, i) => `@dlt.table(name="bronze_${s.name.toLowerCase().replace(/\\s+/g, '_')}")
 @dlt.expect_or_drop("valid_rows", "_rescued_data IS NULL")
-${qualityChecks.filter(q => q.sourceId === s.id || i === 0).map(q => {
+${qualityChecks.filter(q => q.sourceId === s.id).map(q => {
   if (q.rule === 'not_null') return `@dlt.expect_or_${q.onFailure === 'drop' ? 'drop' : 'fail'}("${q.columnName}_not_null", "${q.columnName} IS NOT NULL")`;
   if (q.rule === 'unique') return `@dlt.expect("${q.columnName}_unique", "/* uniqueness check */")`;
   if (q.rule === 'range') return `@dlt.expect_or_${q.onFailure === 'drop' ? 'drop' : 'fail'}("${q.columnName}_range", "${q.columnName} BETWEEN ${q.config.min || 0} AND ${q.config.max || 999999}")`;
   return '';
 }).filter(Boolean).join('\n')}
 def bronze_source_${i + 1}():
-    return spark.read.format("csv")\\
+    df = spark.read.format("csv")\\
         .option("header", "true")\\
         .option("rescuedDataColumn", "_rescued_data")\\
         .load("${s.dbfsPath}${s.fileMask}")
+${getSourceTransformations('bronze', s.id).map(t => {
+  if (t.type === 'filter') return `    df = df.filter("${t.config.condition || ''}")`;
+  if (t.type === 'rename') return `    df = df.withColumnRenamed("${t.sourceColumns[0]}", "${t.config.newName}")`;
+  if (t.type === 'cast') return `    df = df.withColumn("${t.sourceColumns[0]}", col("${t.sourceColumns[0]}").cast("${t.config.targetType}"))`;
+  return `    # ${t.description}`;
+}).join('\n')}
+    return df
 `).join('\n')}
 @dlt.table(name="silver_${outputTableName || 'data'}")
 def silver():
     ${sources.length > 1 ? `# Join sources\n    df = dlt.read("bronze_${sources[0].name.toLowerCase().replace(/\\s+/g, '_')}")` : `df = dlt.read("bronze_${sources[0]?.name.toLowerCase().replace(/\\s+/g, '_') || 'source'}")`}
 ${sources.length > 1 ? sources.slice(1).map((s, i) => `    df${i + 2} = dlt.read("bronze_${s.name.toLowerCase().replace(/\\s+/g, '_')}")\n    df = df.join(df${i + 2}, "client_id", "left")`).join('\n') : ''}
-${silverTransformations.map(t => {
+${getAllLayerTransformations('silver').map(t => {
   if (t.type === 'filter') return `    df = df.filter("${t.config.condition || ''}")`;
   if (t.type === 'rename') return `    df = df.withColumnRenamed("${t.sourceColumns[0]}", "${t.config.newName}")`;
   if (t.type === 'cast') return `    df = df.withColumn("${t.sourceColumns[0]}", col("${t.sourceColumns[0]}").cast("${t.config.targetType}"))`;
@@ -1123,7 +1285,7 @@ ${silverTransformations.map(t => {
 @dlt.table(name="gold_${outputTableName || 'data'}")
 def gold():
     df = dlt.read("silver_${outputTableName || 'data'}")
-${goldTransformations.map(t => {
+${getAllLayerTransformations('gold').map(t => {
   if (t.type === 'aggregate') return `    df = df.groupBy("${(t.config.groupBy as string[])?.join('","')}").agg(sum("amount").alias("total_amount"))`;
   if (t.type === 'filter') return `    df = df.filter("${t.config.condition || ''}")`;
   return `    # ${t.description}`;
@@ -1134,8 +1296,8 @@ ${goldTransformations.map(t => {
             <TabsContent value="config" className="mt-4">
               <pre className="bg-muted p-4 rounded-md text-xs overflow-auto max-h-80 font-mono">{JSON.stringify({
                 name: pipelineName, environment: env, outputTable: outputTableName, outputPath,
-                sources: sources.map(s => ({ name: s.name, fileMask: s.fileMask, dbfsPath: s.dbfsPath, files: s.selectedFiles.length, columns: s.columns.length })),
-                layers: { bronze: bronzeTransformations.length, silver: silverTransformations.length, gold: goldTransformations.length },
+                sources: sources.map(s => ({ name: s.name, fileMask: s.fileMask, dbfsPath: s.dbfsPath, files: s.selectedFiles.length, columns: s.columns.length, transformations: { bronze: getSourceTransformations('bronze', s.id).length, silver: getSourceTransformations('silver', s.id).length, gold: getSourceTransformations('gold', s.id).length } })),
+                crossSource: { bronze: getCrossTransformations('bronze').length, silver: getCrossTransformations('silver').length, gold: getCrossTransformations('gold').length },
                 qualityChecks: qualityChecks.length, totalRescued: totalRescuedRows,
               }, null, 2)}</pre>
             </TabsContent>
